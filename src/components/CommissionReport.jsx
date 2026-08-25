@@ -2,9 +2,11 @@ import React, { useState, useMemo, useEffect, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { Calendar, PieChart, TrendingUp, Download, FileText, ArrowLeft, User, Settings, CheckCircle, AlertCircle, Loader, CloudUpload, X, ExternalLink, FolderOpen } from 'lucide-react';
+import { Calendar, PieChart, TrendingUp, Download, FileText, ArrowLeft, User, Settings, CheckCircle, AlertCircle, Loader, CloudUpload, X, ExternalLink, FolderOpen, Briefcase } from 'lucide-react';
 import { formatDateToDDMMYYYY, formatMoney } from '../utils/policyHelpers';
 import InsurerLogo from './InsurerLogo';
+import { useUser } from '../context/UserContext';
+
 
 // ─── Google Drive Helpers ────────────────────────────────────────────────────
 
@@ -122,14 +124,16 @@ function generatePDFBlob(insurer, details, period) {
 // ─── Component ───────────────────────────────────────────────────────────────
 
 const CommissionReport = ({ payments = [], policies = [] }) => {
+    const { isDemo } = useUser();
     const today = new Date().toISOString().split('T')[0];
     const firstOfMonth = new Date();
     firstOfMonth.setDate(1);
     const defaultFrom = firstOfMonth.toISOString().split('T')[0];
 
-    // Date range
+    // Date range & Filters
     const [dateFrom, setDateFrom] = useState(defaultFrom);
     const [dateTo, setDateTo] = useState(today);
+    const [selectedCartera, setSelectedCartera] = useState('ALL');
     const [selectedInsurer, setSelectedInsurer] = useState(null);
     const [showRatesModal, setShowRatesModal] = useState(false);
 
@@ -250,6 +254,11 @@ const CommissionReport = ({ payments = [], policies = [] }) => {
             if (p.status !== 'Paid') return false;
             if (dateFrom && p.date < dateFrom) return false;
             if (dateTo && p.date > dateTo) return false;
+            if (selectedCartera !== 'ALL') {
+                const policy = policies.find(pol => pol.id === p.policyId);
+                const pCartera = policy?.cartera || 'Santiago Morales y Asociados, S.R.L.';
+                if (pCartera !== selectedCartera) return false;
+            }
             return true;
         });
         const byInsurer = {};
@@ -275,7 +284,7 @@ const CommissionReport = ({ payments = [], policies = [] }) => {
             totalPremiums += premium;
         });
         return { byInsurer, totalCommission, totalPremiums, count: relevant.length };
-    }, [payments, policies, dateFrom, dateTo, insurerRates]);
+    }, [payments, policies, dateFrom, dateTo, selectedCartera, insurerRates]);
 
     const formatCurrency = (n) => formatMoney(n);
 
@@ -431,37 +440,61 @@ const CommissionReport = ({ payments = [], policies = [] }) => {
                 </div>
             )}
 
-            {/* Date Range Selector */}
+            {/* Date Range & Cartera Selector */}
             {!selectedInsurer && (
                 <div className="card" style={{ padding: '1rem 1.5rem', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
-                    <Calendar size={20} color="var(--primary)" style={{ flexShrink: 0 }} />
-                    <span style={{ fontWeight: '600', whiteSpace: 'nowrap' }}>Período:</span>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                        <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
-                            style={{ padding: '0.4rem 0.75rem', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: '0.9rem' }} />
-                        <span style={{ color: 'var(--text-muted)' }}>hasta</span>
-                        <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
-                            style={{ padding: '0.4rem 0.75rem', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: '0.9rem' }} />
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <Briefcase size={18} color="var(--primary)" />
+                        <select
+                            value={selectedCartera}
+                            onChange={(e) => setSelectedCartera(e.target.value)}
+                            style={{
+                                padding: '0.45rem 0.8rem',
+                                borderRadius: 'var(--radius-sm)',
+                                border: selectedCartera !== 'ALL' ? '1.5px solid #2563eb' : '1px solid var(--border)',
+                                fontSize: '0.88rem',
+                                fontWeight: '700',
+                                backgroundColor: selectedCartera !== 'ALL' ? '#eff6ff' : 'white',
+                                color: selectedCartera !== 'ALL' ? '#1d4ed8' : 'var(--text-main)',
+                                cursor: 'pointer'
+                            }}
+                        >
+                            <option value="ALL">💼 Todas las Carteras</option>
+                            <option value="Santiago Morales y Asociados, S.R.L.">💼 Santiago Morales y Asoc.</option>
+                            <option value="Raquel Rodríguez">💼 Raquel Rodríguez</option>
+                        </select>
                     </div>
-                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginLeft: 'auto' }}>
+
+                    <div style={{ height: '24px', width: '1px', backgroundColor: 'var(--border)' }} />
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <Calendar size={18} color="var(--primary)" style={{ flexShrink: 0 }} />
+                        <span style={{ fontWeight: '600', fontSize: '0.9rem', whiteSpace: 'nowrap' }}>Período:</span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                            <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
+                                style={{ padding: '0.4rem 0.6rem', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: '0.88rem' }} />
+                            <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>hasta</span>
+                            <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
+                                style={{ padding: '0.4rem 0.6rem', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: '0.88rem' }} />
+                        </div>
+                    </div>
+
+                    <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginLeft: 'auto' }}>
                         {[
                             { label: '1ra Q. (1-15)', type: '1q' },
                             { label: '2da Q. (16-30)', type: '2q' },
-                            { label: '1ra Q. Ant. (1-15)', type: '1qp' },
-                            { label: '2da Q. Ant. (16-30)', type: '2qp' },
+                            { label: '1ra Q. Ant.', type: '1qp' },
+                            { label: '2da Q. Ant.', type: '2qp' },
                             { label: 'Este Mes', type: 'month' },
-                            { label: 'Mes Anterior', type: 'prevMonth' },
+                            { label: 'Mes Ant.', type: 'prevMonth' },
                             { label: 'Todo', type: 'all' },
                         ].map(({ label, type }) => (
                             <button key={type} className="btn" onClick={() => setQuickRange(type)}
-                                style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem', backgroundColor: '#f1f5f9', border: '1px solid var(--border)' }}>
+                                style={{ fontSize: '0.78rem', padding: '0.35rem 0.6rem', backgroundColor: '#f1f5f9', border: '1px solid var(--border)' }}>
                                 {label}
                             </button>
                         ))}
                     </div>
-                    <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
-                        📅 {formatDateLabel()} · <strong>{reportData.count}</strong> pago(s)
-                    </span>
                 </div>
             )}
 
@@ -535,7 +568,7 @@ const CommissionReport = ({ payments = [], policies = [] }) => {
                                                     </td>
                                                     <td style={{ padding: '1rem', textAlign: 'right' }}>{data.count}</td>
                                                     <td style={{ padding: '1rem', textAlign: 'right' }}>{formatCurrency(data.premiums)}</td>
-                                                    <td style={{ padding: '1rem', textAlign: 'right' }}>{(data.rate * 100).toFixed(0)}%</td>
+                                                    <td style={{ padding: '1rem', textAlign: 'right' }}>{parseFloat((data.rate * 100).toFixed(2))}%</td>
                                                     <td style={{ padding: '1rem', textAlign: 'right', fontWeight: 'bold', color: 'var(--success)' }}>
                                                         {formatCurrency(data.commission)}
                                                     </td>
@@ -695,15 +728,20 @@ const CommissionReport = ({ payments = [], policies = [] }) => {
                                             type="number"
                                             min="0"
                                             max="100"
-                                            step="0.5"
-                                            value={Math.round(insurerRates[insurer] * 100)}
+                                            step="any"
+                                            defaultValue={insurerRates[insurer] !== undefined ? parseFloat((insurerRates[insurer] * 100).toFixed(4)) : ''}
+                                            key={`${insurer}_${insurerRates[insurer]}`}
                                             onChange={e => {
                                                 const val = parseFloat(e.target.value) / 100;
-                                                const updated = { ...insurerRates, [insurer]: isNaN(val) ? 0 : val };
-                                                setInsurerRates(updated);
-                                                localStorage.setItem('insurer_commission_rates', JSON.stringify(updated));
+                                                if (!isNaN(val) && val >= 0 && val <= 1) {
+                                                    const updated = { ...insurerRates, [insurer]: val };
+                                                    setInsurerRates(updated);
+                                                    if (!isDemo) {
+                                                        localStorage.setItem('insurer_commission_rates', JSON.stringify(updated));
+                                                    }
+                                                }
                                             }}
-                                            style={{ width: '80px', padding: '0.35rem 0.5rem', textAlign: 'right' }}
+                                            style={{ width: '85px', padding: '0.35rem 0.5rem', textAlign: 'right', fontWeight: '600' }}
                                         />
                                         <span style={{ fontWeight: '600' }}>%</span>
                                     </div>

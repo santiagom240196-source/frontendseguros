@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import {
     Search, Plus, Calendar, AlertTriangle, Clock, CheckCircle,
     XCircle, FileText, Paperclip, X, ChevronRight, Shield,
-    Phone, Hash, User, Building2
+    Phone, Hash, User, Building2, ArrowUpDown, ArrowUp, ArrowDown
 } from 'lucide-react';
 import { formatDateToDDMMYYYY, formatMoney } from '../utils/policyHelpers';
 import InsurerLogo from './InsurerLogo';
@@ -23,9 +23,13 @@ const TYPE_OPTIONS = [
     'Vida', 'Incendio Comercial', 'Responsabilidad Civil', 'Otro'
 ];
 
+import { useUser } from '../context/UserContext';
+import { insertSiniestroHasura, updateSiniestroHasura } from '../services/hasuraService';
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 const ClaimsManagement = ({ policies = [], claims = [], setClaims }) => {
+    const { isDemo } = useUser();
     const today = new Date().toISOString().split('T')[0];
     const firstOfMonth = new Date(); firstOfMonth.setDate(1);
     const defaultFrom = firstOfMonth.toISOString().split('T')[0];
@@ -79,11 +83,36 @@ const ClaimsManagement = ({ policies = [], claims = [], setClaims }) => {
         setNewClaim(prev => ({ ...prev, attachments: [...prev.attachments, ...names] }));
     };
 
-    const handleSubmit = (e) => {
+    const handleSubmit = async (e) => {
         e.preventDefault();
-        const id = `SIN-${String(claims.length + 1).padStart(3, '0')}`;
-        const formattedAmount = formatMoney(newClaim.amount);
-        setClaims([{ id, ...newClaim, amount: formattedAmount, reportDate: today, amountNum: parseFloat(newClaim.amount.replace(/[^0-9.]/g, '')) || 0 }, ...claims]);
+        const id = `SIN-${String(claims.length + 1).padStart(4, '0')}`;
+        const cleanAmount = parseFloat(newClaim.amount.replace(/[^0-9.]/g, '')) || 0;
+        const formattedAmount = formatMoney(cleanAmount);
+        
+        const matchedPolicy = policies.find(p => p.id === newClaim.selectedPolicyId);
+
+        const claimToAdd = {
+            id,
+            ...newClaim,
+            polizaId: matchedPolicy ? (matchedPolicy.rawId || matchedPolicy.id) : null,
+            clienteId: matchedPolicy ? matchedPolicy.clienteId : null,
+            amount: formattedAmount,
+            reportDate: today,
+            amountNum: cleanAmount,
+            amountApproved: 'RD$ 0',
+            amountApprovedNum: 0,
+        };
+
+        setClaims([claimToAdd, ...claims]);
+
+        if (!isDemo) {
+            try {
+                await insertSiniestroHasura(claimToAdd, isDemo);
+            } catch (err) {
+                console.warn('Failed to insert claim in Hasura:', err);
+            }
+        }
+
         setShowModal(false);
         setNewClaim({ client: '', policy: '', policyDesc: '', type: TYPE_OPTIONS[0], date: today, description: '', amount: '', adjuster: '', phone: '', notes: '', status: 'Abierto', attachments: [], selectedPolicyId: '' });
         setPolicySearch('');
@@ -119,6 +148,51 @@ const ClaimsManagement = ({ policies = [], claims = [], setClaims }) => {
         if (activeFilter === 'All') return matchSearch;
         return matchSearch && c.status === activeFilter;
     }), [dateFiltClaims, searchTerm, activeFilter]);
+
+    // Sorting state
+    const [sortConfig, setSortConfig] = useState({ key: 'date', direction: 'desc' });
+
+    const handleSort = (key) => {
+        setSortConfig(prev => {
+            if (prev.key === key) {
+                return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
+            }
+            return { key, direction: 'asc' };
+        });
+    };
+
+    const renderSortIcon = (columnKey) => {
+        if (sortConfig.key !== columnKey) {
+            return <ArrowUpDown size={13} style={{ opacity: 0.35, marginLeft: '5px', verticalAlign: 'middle' }} />;
+        }
+        return sortConfig.direction === 'asc'
+            ? <ArrowUp size={14} style={{ color: '#2563eb', marginLeft: '5px', verticalAlign: 'middle', fontWeight: 'bold' }} />
+            : <ArrowDown size={14} style={{ color: '#2563eb', marginLeft: '5px', verticalAlign: 'middle', fontWeight: 'bold' }} />;
+    };
+
+    const sortedClaims = useMemo(() => {
+        if (!sortConfig.key) return filteredClaims;
+        return [...filteredClaims].sort((a, b) => {
+            let valA = a[sortConfig.key];
+            let valB = b[sortConfig.key];
+
+            if (sortConfig.key === 'amount' || sortConfig.key === 'amountNum') {
+                valA = a.amountNum !== undefined ? a.amountNum : parseFloat(String(a.amount || '0').replace(/[^0-9.-]+/g, '')) || 0;
+                valB = b.amountNum !== undefined ? b.amountNum : parseFloat(String(b.amount || '0').replace(/[^0-9.-]+/g, '')) || 0;
+            } else if (sortConfig.key === 'date' || sortConfig.key === 'reportDate') {
+                valA = new Date(valA || '1970-01-01').getTime();
+                valB = new Date(valB || '1970-01-01').getTime();
+            }
+
+            if (typeof valA === 'number' && typeof valB === 'number') {
+                return sortConfig.direction === 'asc' ? valA - valB : valB - valA;
+            }
+
+            const strA = String(valA || '').toLowerCase();
+            const strB = String(valB || '').toLowerCase();
+            return sortConfig.direction === 'asc' ? strA.localeCompare(strB, 'es') : strB.localeCompare(strA, 'es');
+        });
+    }, [filteredClaims, sortConfig]);
 
     const toggleFilter = (s) => setActiveFilter(prev => prev === s ? 'All' : s);
 
@@ -303,7 +377,28 @@ const ClaimsManagement = ({ policies = [], claims = [], setClaims }) => {
                         <Search size={18} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
                         <input type="text" placeholder="Buscar por ID, cliente, tipo…"
                             value={searchTerm} onChange={e => setSearchTerm(e.target.value)}
-                            style={{ paddingLeft: 40 }} />
+                            style={{ paddingLeft: 40, paddingRight: searchTerm ? 36 : 12 }} />
+                        {searchTerm && (
+                            <button
+                                onClick={() => setSearchTerm('')}
+                                style={{
+                                    position: 'absolute',
+                                    right: '10px',
+                                    top: '50%',
+                                    transform: 'translateY(-50%)',
+                                    background: 'none',
+                                    border: 'none',
+                                    cursor: 'pointer',
+                                    color: 'var(--text-muted)',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    padding: '2px'
+                                }}
+                                title="Limpiar búsqueda"
+                            >
+                                <X size={16} />
+                            </button>
+                        )}
                     </div>
                     {activeFilter !== 'All' && (
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.35rem 0.75rem', backgroundColor: '#f1f5f9', borderRadius: '999px', fontSize: '0.85rem' }}>
@@ -319,17 +414,75 @@ const ClaimsManagement = ({ policies = [], claims = [], setClaims }) => {
                     <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                         <thead>
                             <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid var(--border)' }}>
-                                {['ID', 'Cliente / Póliza', 'Tipo', 'Fecha', 'Monto', 'Estado', ''].map(h => (
-                                    <th key={h} style={{ padding: '1rem', textAlign: h === 'Monto' ? 'right' : 'left', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{h}</th>
-                                ))}
+                                <th
+                                    onClick={() => handleSort('id')}
+                                    style={{ padding: '1rem', textAlign: 'left', color: sortConfig.key === 'id' ? '#2563eb' : 'var(--text-muted)', cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                                    title="Hacer clic para ordenar por ID"
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center' }}>
+                                        <span>ID</span>
+                                        {renderSortIcon('id')}
+                                    </div>
+                                </th>
+                                <th
+                                    onClick={() => handleSort('client')}
+                                    style={{ padding: '1rem', textAlign: 'left', color: sortConfig.key === 'client' ? '#2563eb' : 'var(--text-muted)', cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                                    title="Hacer clic para ordenar por Cliente / Póliza"
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center' }}>
+                                        <span>Cliente / Póliza</span>
+                                        {renderSortIcon('client')}
+                                    </div>
+                                </th>
+                                <th
+                                    onClick={() => handleSort('type')}
+                                    style={{ padding: '1rem', textAlign: 'left', color: sortConfig.key === 'type' ? '#2563eb' : 'var(--text-muted)', cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                                    title="Hacer clic para ordenar por Tipo"
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center' }}>
+                                        <span>Tipo</span>
+                                        {renderSortIcon('type')}
+                                    </div>
+                                </th>
+                                <th
+                                    onClick={() => handleSort('date')}
+                                    style={{ padding: '1rem', textAlign: 'left', color: sortConfig.key === 'date' ? '#2563eb' : 'var(--text-muted)', cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                                    title="Hacer clic para ordenar por Fecha"
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center' }}>
+                                        <span>Fecha</span>
+                                        {renderSortIcon('date')}
+                                    </div>
+                                </th>
+                                <th
+                                    onClick={() => handleSort('amount')}
+                                    style={{ padding: '1rem', textAlign: 'right', color: sortConfig.key === 'amount' ? '#2563eb' : 'var(--text-muted)', cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                                    title="Hacer clic para ordenar por Monto"
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
+                                        <span>Monto</span>
+                                        {renderSortIcon('amount')}
+                                    </div>
+                                </th>
+                                <th
+                                    onClick={() => handleSort('status')}
+                                    style={{ padding: '1rem', textAlign: 'left', color: sortConfig.key === 'status' ? '#2563eb' : 'var(--text-muted)', cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                                    title="Hacer clic para ordenar por Estado"
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center' }}>
+                                        <span>Estado</span>
+                                        {renderSortIcon('status')}
+                                    </div>
+                                </th>
+                                <th style={{ padding: '1rem', width: '50px' }}></th>
                             </tr>
                         </thead>
                         <tbody>
-                            {filteredClaims.length === 0 ? (
+                            {sortedClaims.length === 0 ? (
                                 <tr><td colSpan="7" style={{ padding: '2.5rem', textAlign: 'center', color: 'var(--text-muted)', fontStyle: 'italic' }}>
                                     No se encontraron siniestros para el período y filtro seleccionados.
                                 </td></tr>
-                            ) : filteredClaims.map(c => (
+                            ) : sortedClaims.map(c => (
                                 <tr key={c.id} className="hover-row" style={{ borderBottom: '1px solid var(--border)', cursor: 'pointer' }}
                                     onClick={() => setSelectedClaim(c)}>
                                     <td style={{ padding: '1rem', fontWeight: 'bold', color: 'var(--primary)', whiteSpace: 'nowrap' }}>{c.id}</td>

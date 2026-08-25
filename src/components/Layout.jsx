@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import Sidebar from './Sidebar';
 import Header from './Header';
 
-const Layout = ({ children, activePage, onNavigate }) => {
+const Layout = ({ children, activePage, onNavigate, clients = [], policies = [], requests = [], onNavigateToPolicy }) => {
     const [isPinned, setIsPinned] = useState(() => {
         const saved = localStorage.getItem('sidebar_pinned');
         return saved !== null ? JSON.parse(saved) : true;
@@ -56,6 +56,7 @@ const Layout = ({ children, activePage, onNavigate }) => {
                         isPinned={isPinned}
                         onTogglePin={handleTogglePin}
                         isCollapsed={isCollapsed}
+                        requests={requests}
                     />
                 </div>
             </div>
@@ -69,7 +70,11 @@ const Layout = ({ children, activePage, onNavigate }) => {
             }}>
                 <Header 
                     onToggleSidebar={() => setIsDrawerOpen(!isDrawerOpen)} 
-                    showMenuButton={!isPinned} 
+                    showMenuButton={!isPinned}
+                    clients={clients}
+                    policies={policies}
+                    onNavigate={onNavigate}
+                    onNavigateToPolicy={onNavigateToPolicy}
                 />
                 <main style={{ padding: '2rem', flex: 1 }}>
                     <div className="container">

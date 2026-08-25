@@ -1,16 +1,109 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Search, Filter, FileText, CheckCircle, AlertTriangle, XCircle, ChevronRight, ArrowLeft, ExternalLink, File, Plus, Upload, Paperclip, Loader2, DollarSign, User } from 'lucide-react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { 
+    Search, Filter, FileText, CheckCircle, AlertTriangle, XCircle, ChevronRight, 
+    ArrowLeft, ExternalLink, File, Plus, Upload, Paperclip, Loader2, DollarSign, 
+    User, RotateCw, RefreshCw, ShieldAlert, Shield, Briefcase, ChevronDown, Check,
+    Edit, Save, X, ArrowUpDown, ArrowUp, ArrowDown 
+} from 'lucide-react';
 import { DR_LOCATIONS, getSectors } from '../constants/locations';
-import { createClientFolder } from '../services/googleDrive';
-import { getNextRenewalDate, calculatePolicyStatus, getPolicyPaymentStats, formatDateToDDMMYYYY, formatMoney } from '../utils/policyHelpers';
+import { 
+    getNextRenewalDate, calculatePolicyStatus, processPolicyRenewalAndStatus, 
+    getPolicyPaymentStats, formatDateToDDMMYYYY, formatMoney,
+    isOpenClaim, getPolicyClaims, policyMatchesAgentCode 
+} from '../utils/policyHelpers';
 import InsurerLogo from './InsurerLogo';
 import InsurerSelect from './InsurerSelect';
+import { useUser } from '../context/UserContext';
+import { updatePolicyHasura, insertMovimientoHasura, insertPolicyHasura, insertClientHasura } from '../services/hasuraService';
+import { getFolderMappings } from '../services/googleDrive';
+import DocumentManager from './DocumentManager';
+import DocumentViewerModal from './DocumentViewerModal';
+import { getAllPolicyDocuments, saveDocumentForEntity, fileToDataUri } from '../services/documentsService';
 
-const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments = [], companies = [], initialSelectedId, onClearSelection, shouldOpenCreateModal, onDetailedActionHandled }) => {
+const PolicyList = ({ 
+    policies, 
+    setPolicies, 
+    clients = [], 
+    setClients, 
+    payments = [], 
+    claims = [], 
+    agentCodes = [], 
+    companies = [], 
+    initialSelectedId, 
+    onClearSelection, 
+    shouldOpenCreateModal, 
+    onDetailedActionHandled, 
+    onNavigateToClaim 
+}) => {
+    const { isDemo } = useUser();
     const [searchTerm, setSearchTerm] = useState('');
+    const [statusTab, setStatusTab] = useState('ALL'); // 'ALL', 'ACTIVE', 'EXPIRING', 'PENDING', 'CANCELLED'
+    const [selectedCodeId, setSelectedCodeId] = useState('ALL'); // 'ALL', or specific broker code id
+    const [isCodeDropdownOpen, setIsCodeDropdownOpen] = useState(false);
+    const codeDropdownRef = useRef(null);
     const [selectedPolicy, setSelectedPolicy] = useState(null);
     const [showMovementModal, setShowMovementModal] = useState(false);
     const [showCreatePolicyModal, setShowCreatePolicyModal] = useState(false);
+    const [viewingMovementDoc, setViewingMovementDoc] = useState(null);
+
+    // Edit Policy State
+    const [showEditPolicyModal, setShowEditPolicyModal] = useState(false);
+    const [editPolicyForm, setEditPolicyForm] = useState({
+        id: '',
+        client: '',
+        clienteId: null,
+        insurer: 'La Colonial de Seguros',
+        type: 'Vehículo',
+        cartera: 'Santiago Morales y Asociados, S.R.L.',
+        agentCode: '8055',
+        insuredAmount: '',
+        amount: '',
+        currency: 'DOP',
+        renewalFrequency: 'Anual',
+        startDate: '',
+        lastRenewalDate: '',
+        endDate: '',
+        details: '',
+        status: 'Active'
+    });
+    const [isSavingPolicy, setIsSavingPolicy] = useState(false);
+
+    // Click outside listener for broker code dropdown
+    useEffect(() => {
+        const handleClickOutside = (event) => {
+            if (codeDropdownRef.current && !codeDropdownRef.current.contains(event.target)) {
+                setIsCodeDropdownOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
+
+    const selectedCodeItem = useMemo(() => {
+        if (selectedCodeId === 'ALL') return null;
+        return (agentCodes || []).find(c => String(c.id || `${c.code}_${c.insurer}`) === String(selectedCodeId));
+    }, [selectedCodeId, agentCodes]);
+
+    const groupedCodesByCompany = useMemo(() => {
+        const groups = {};
+        (agentCodes || []).forEach(codeItem => {
+            const insurerName = codeItem.insurer || 'Otras Aseguradoras';
+            if (!groups[insurerName]) {
+                groups[insurerName] = {
+                    insurer: insurerName,
+                    codes: []
+                };
+            }
+            const count = policies.filter(p => policyMatchesAgentCode(p, codeItem)).length;
+            const key = String(codeItem.id || `${codeItem.code}_${codeItem.insurer}_${codeItem.agent}`);
+            groups[insurerName].codes.push({
+                key,
+                item: codeItem,
+                count
+            });
+        });
+        return Object.values(groups);
+    }, [agentCodes, policies]);
 
     // New Client Creation State inside Policy Modal
     const [isCreatingClient, setIsCreatingClient] = useState(false);
@@ -30,6 +123,20 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
     const [clientSearch, setClientSearch] = useState('');
     const [showClientDropdown, setShowClientDropdown] = useState(false);
     const clientDropdownRef = useRef(null);
+
+    // Map policies to their computed status and renewal process
+    const policyStatusMap = useMemo(() => {
+        const map = {};
+        policies.forEach(p => {
+            map[p.id] = processPolicyRenewalAndStatus(p, payments);
+        });
+        return map;
+    }, [policies, payments]);
+
+    const activeCount = useMemo(() => policies.filter(p => policyStatusMap[p.id]?.status === 'Active').length, [policies, policyStatusMap]);
+    const expiringCount = useMemo(() => policies.filter(p => policyStatusMap[p.id]?.status === 'Expiring').length, [policies, policyStatusMap]);
+    const pendingCount = useMemo(() => policies.filter(p => policyStatusMap[p.id]?.status === 'Pending').length, [policies, policyStatusMap]);
+    const cancelledCount = useMemo(() => policies.filter(p => policyStatusMap[p.id]?.status === 'Cancelled').length, [policies, policyStatusMap]);
 
     // Handle initial open of Create Modal (from Dashboard Action)
     useEffect(() => {
@@ -83,13 +190,111 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
         (client.city && client.city.toLowerCase().includes(clientSearch.toLowerCase()))
     );
 
+    const filteredPolicies = useMemo(() => {
+        return policies.filter(policy => {
+            const statusInfo = policyStatusMap[policy.id] || { status: 'Active' };
+
+            // Filter by Tab
+            if (statusTab === 'ACTIVE' && statusInfo.status !== 'Active') return false;
+            if (statusTab === 'EXPIRING' && statusInfo.status !== 'Expiring') return false;
+            if (statusTab === 'PENDING' && statusInfo.status !== 'Pending') return false;
+            if (statusTab === 'CANCELLED' && statusInfo.status !== 'Cancelled') return false;
+
+            // Filter by Broker Code & Insurer
+            if (selectedCodeId !== 'ALL' && selectedCodeItem) {
+                if (!policyMatchesAgentCode(policy, selectedCodeItem)) return false;
+            }
+
+            // Filter by Search term
+            if (!searchTerm.trim()) return true;
+            const term = searchTerm.toLowerCase().trim();
+            return (
+                (policy.id || '').toLowerCase().includes(term) ||
+                (policy.client || '').toLowerCase().includes(term) ||
+                (policy.insurer || '').toLowerCase().includes(term) ||
+                (policy.type || '').toLowerCase().includes(term) ||
+                (policy.cartera || '').toLowerCase().includes(term) ||
+                (policy.agentCode || '').toLowerCase().includes(term) ||
+                (policy.details || '').toLowerCase().includes(term) ||
+                (policy.amount || '').toLowerCase().includes(term)
+            );
+        });
+    }, [policies, policyStatusMap, statusTab, selectedCodeId, selectedCodeItem, searchTerm]);
+
+    // Sorting state
+    const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
+
+    const handleSort = (key) => {
+        setSortConfig(prev => {
+            if (prev.key === key) {
+                return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
+            }
+            return { key, direction: 'asc' };
+        });
+    };
+
+    const renderSortIcon = (columnKey) => {
+        if (sortConfig.key !== columnKey) {
+            return <ArrowUpDown size={13} style={{ opacity: 0.35, marginLeft: '5px', verticalAlign: 'middle' }} />;
+        }
+        return sortConfig.direction === 'asc'
+            ? <ArrowUp size={14} style={{ color: '#2563eb', marginLeft: '5px', verticalAlign: 'middle', fontWeight: 'bold' }} />
+            : <ArrowDown size={14} style={{ color: '#2563eb', marginLeft: '5px', verticalAlign: 'middle', fontWeight: 'bold' }} />;
+    };
+
+    const sortedPolicies = useMemo(() => {
+        if (!sortConfig.key) return filteredPolicies;
+        return [...filteredPolicies].sort((a, b) => {
+            let valA = a[sortConfig.key];
+            let valB = b[sortConfig.key];
+
+            if (sortConfig.key === 'status') {
+                valA = (policyStatusMap[a.id] || {}).status || 'Active';
+                valB = (policyStatusMap[b.id] || {}).status || 'Active';
+            } else if (sortConfig.key === 'amount' || sortConfig.key === 'insuredAmount') {
+                valA = typeof a[sortConfig.key] === 'number' ? a[sortConfig.key] : parseFloat(String(a[sortConfig.key] || '0').replace(/[^0-9.-]+/g, '')) || 0;
+                valB = typeof b[sortConfig.key] === 'number' ? b[sortConfig.key] : parseFloat(String(b[sortConfig.key] || '0').replace(/[^0-9.-]+/g, '')) || 0;
+            } else if (sortConfig.key === 'endDate' || sortConfig.key === 'startDate' || sortConfig.key === 'lastRenewalDate') {
+                valA = new Date(valA || '1970-01-01').getTime();
+                valB = new Date(valB || '1970-01-01').getTime();
+            }
+
+            if (typeof valA === 'number' && typeof valB === 'number') {
+                return sortConfig.direction === 'asc' ? valA - valB : valB - valA;
+            }
+
+            const strA = String(valA || '').toLowerCase();
+            const strB = String(valB || '').toLowerCase();
+            return sortConfig.direction === 'asc' ? strA.localeCompare(strB, 'es') : strB.localeCompare(strA, 'es');
+        });
+    }, [filteredPolicies, sortConfig, policyStatusMap]);
+
+    const policyExtraDocs = useMemo(() => {
+        if (!selectedPolicy) return [];
+        return getAllPolicyDocuments(selectedPolicy, payments);
+    }, [selectedPolicy, payments]);
+
     // Form state for new movement
     const [newMovement, setNewMovement] = useState({
         type: 'Endoso',
         date: new Date().toISOString().split('T')[0],
         description: '',
-        file: null
+        files: [],
+        // Renewal-specific fields
+        renewalNewStart: '',
+        renewalNewEnd: '',
+        renewalNewAmount: '',
+        renewalNewCurrency: 'DOP',
+        renewalNewPolicyNumber: '',
+        renewalNote: ''
     });
+
+    // Movement list filter state
+    const [movFilterType, setMovFilterType] = useState('Todos');
+    const [movFilterFrom, setMovFilterFrom] = useState('');
+    const [movFilterTo, setMovFilterTo] = useState('');
+    // Track which movement is being edited (null = create new)
+    const [editingMovementId, setEditingMovementId] = useState(null);
 
     // Form state for new policy
     const [newPolicy, setNewPolicy] = useState({
@@ -97,6 +302,8 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
         client: '',
         type: 'Auto',
         insurer: '',
+        cartera: 'Santiago Morales y Asociados, S.R.L.',
+        agentCode: '',
         startDate: new Date().toISOString().split('T')[0],
         renewalFrequency: 'Anual',
         insuredAmount: '',
@@ -105,7 +312,68 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
         details: ''
     });
 
+    // Helper to auto-lookup agent code
+    const getAutoAgentCode = (carteraName, insurerName) => {
+        if (!carteraName || !insurerName) return '';
+        const match = agentCodes.find(ac => 
+            (ac.agent || '').toLowerCase().trim() === carteraName.toLowerCase().trim() &&
+            (insurerName.toLowerCase().includes((ac.insurer || '').toLowerCase().trim()) || (ac.insurer || '').toLowerCase().includes(insurerName.toLowerCase().trim()))
+        );
+        return match ? match.code : '';
+    };
 
+    const handleReactivatePolicy = async (policyToReactivate) => {
+        const todayStr = new Date().toISOString().split('T')[0];
+        const nextEndDate = getNextRenewalDate(todayStr, policyToReactivate.renewalFrequency || 'Anual');
+
+        const updatedPolicy = {
+            ...policyToReactivate,
+            status: 'Active',
+            lastRenewalDate: todayStr,
+            endDate: nextEndDate,
+            renewal: nextEndDate,
+            movements: [
+                ...(policyToReactivate.movements || []),
+                {
+                    id: (policyToReactivate.movements?.length || 0) + 1,
+                    date: todayStr,
+                    type: 'Reactivación',
+                    description: `Póliza reactivada y reabierta como Vigente. Nueva vigencia hasta ${formatDateToDDMMYYYY(nextEndDate)}.`,
+                    evidence: 'N/A'
+                }
+            ]
+        };
+
+        const updatedList = policies.map(p => p.id === policyToReactivate.id ? updatedPolicy : p);
+        setPolicies(updatedList);
+        if (selectedPolicy && selectedPolicy.id === policyToReactivate.id) {
+            setSelectedPolicy(updatedPolicy);
+        }
+
+        if (!isDemo) {
+            try {
+                await updatePolicyHasura(policyToReactivate.rawId || policyToReactivate.id, {
+                    ...updatedPolicy,
+                    status: 'Active',
+                    startDate: policyToReactivate.startDate,
+                    renewalFrequency: policyToReactivate.renewalFrequency,
+                    amount: policyToReactivate.amount
+                }, isDemo);
+
+                await insertMovimientoHasura({
+                    polizaId: policyToReactivate.rawId || policyToReactivate.id,
+                    date: todayStr,
+                    type: 'Reactivación',
+                    description: `Póliza reactivada y reabierta como Vigente. Nueva vigencia hasta ${formatDateToDDMMYYYY(nextEndDate)}.`,
+                    evidence: 'N/A'
+                }, isDemo);
+            } catch (err) {
+                console.warn('Error reactivating policy in Hasura:', err);
+            }
+        }
+
+        alert(`Póliza ${policyToReactivate.id} reactivada exitosamente como Vigente hasta el ${formatDateToDDMMYYYY(nextEndDate)}.`);
+    };
 
     const handleCreatePolicy = async (e) => {
         e.preventDefault();
@@ -126,6 +394,7 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
 
             let clientName = newPolicy.client;
             let folderLink = '#';
+            let createdClientId = null;
 
             // If creating a new client, add them first
             if (isCreatingClient) {
@@ -144,20 +413,36 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
                     name: newClientData.name,
                     personType: newClientData.personType,
                     documentId: newClientData.documentId,
-                    insurerCode: newClientData.insurerCode,
+                    insurerCode: newClientData.insurerCode || newPolicy.agentCode || '',
+                    cartera: newPolicy.cartera || 'Santiago Morales y Asociados, S.R.L.',
                     email: newClientData.email,
                     phone: newClientData.phone,
                     address: '',
                     city: newClientData.city,
                     sector: newClientData.sector,
-                    policy: newPolicy.type, // Set initial policy type
+                    policy: newPolicy.type,
                     status: 'Active',
                     folderLink: folderLink
                 };
-                // Update clients list
+
+                if (!isDemo) {
+                    try {
+                        const resC = await insertClientHasura(newClientObj, isDemo);
+                        if (resC?.data?.insert_clientes_one?.id) {
+                            newClientObj.id = resC.data.insert_clientes_one.id;
+                            createdClientId = newClientObj.id;
+                        }
+                    } catch (cErr) {
+                        console.warn('Error inserting client in Hasura:', cErr);
+                    }
+                }
+
                 if (setClients) {
                     setClients([newClientObj, ...clients]);
                 }
+            } else {
+                const existingClient = clients.find(c => c.name === clientName);
+                if (existingClient) createdClientId = existingClient.id;
             }
 
             const formattedInsuredAmount = formatMoney(newPolicy.insuredAmount, newPolicy.currency);
@@ -165,10 +450,16 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
 
             const policyToAdd = {
                 id: policyId,
+                clienteId: createdClientId,
                 client: clientName,
                 type: newPolicy.type,
                 insurer: newPolicy.insurer,
+                cartera: newPolicy.cartera || 'Santiago Morales y Asociados, S.R.L.',
+                agentCode: newPolicy.agentCode || getAutoAgentCode(newPolicy.cartera, newPolicy.insurer) || '',
                 startDate: newPolicy.startDate,
+                lastRenewalDate: newPolicy.startDate,
+                endDate: getNextRenewalDate(newPolicy.startDate, newPolicy.renewalFrequency),
+                renewal: getNextRenewalDate(newPolicy.startDate, newPolicy.renewalFrequency),
                 renewalFrequency: newPolicy.renewalFrequency,
                 currency: newPolicy.currency,
                 insuredAmount: formattedInsuredAmount,
@@ -182,15 +473,37 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
                     evidence: 'N/A'
                 }]
             };
+
+            if (!isDemo) {
+                try {
+                    await insertPolicyHasura(policyToAdd, isDemo);
+                } catch (pErr) {
+                    console.warn('Error inserting policy in Hasura:', pErr);
+                }
+            }
+
             setPolicies([...policies, policyToAdd]);
             setShowCreatePolicyModal(false);
-            setNewPolicy({ id: '', client: '', type: 'Auto', insurer: '', startDate: new Date().toISOString().split('T')[0], renewalFrequency: 'Anual', insuredAmount: '', amount: '', currency: 'DOP', details: '' });
+            setNewPolicy({ 
+                id: '', 
+                client: '', 
+                type: 'Auto', 
+                insurer: '', 
+                cartera: 'Santiago Morales y Asociados, S.R.L.',
+                agentCode: '',
+                startDate: new Date().toISOString().split('T')[0], 
+                renewalFrequency: 'Anual', 
+                insuredAmount: '', 
+                amount: '', 
+                currency: 'DOP', 
+                details: '' 
+            });
 
             // Reset client creation state
             setIsCreatingClient(false);
             setNewClientData({ name: '', personType: '', documentId: '', insurerCode: '', email: '', phone: '', city: '', sector: '' });
 
-            alert(`Póliza ${policyId} creada exitosamente${isCreatingClient ? ` para el nuevo cliente ${clientName}` : ''}.`);
+            alert(`Póliza ${policyId} creada exitosamente para la cartera de ${policyToAdd.cartera}.`);
         } catch (error) {
             console.error("Error creating policy:", error);
             alert("Error al procesar la solicitud.");
@@ -211,43 +524,569 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
     };
 
     const getDriveLink = (policy) => {
+        if (!policy) return 'https://drive.google.com';
+        const mappings = getFolderMappings();
+        if (mappings?.policies?.[policy.id]?.webViewLink) {
+            return mappings.policies[policy.id].webViewLink;
+        }
+        if (policy.clienteId && mappings?.clients?.[policy.clienteId]?.webViewLink) {
+            return mappings.clients[policy.clienteId].webViewLink;
+        }
+        if (policy.client && mappings?.clients?.[policy.client]?.webViewLink) {
+            return mappings.clients[policy.client].webViewLink;
+        }
         // Constructs a search query for Google Drive based on client and policy ID
-        const query = `${policy.client} ${policy.id}`;
+        const query = `${policy.client || ''} ${policy.id || ''}`.trim();
         return `https://drive.google.com/drive/search?q=${encodeURIComponent(query)}`;
     };
 
-    const handleAddMovement = (e) => {
+    const handleAddMovement = async (e) => {
         e.preventDefault();
 
-        // Mocking file upload - just getting the name
-        const fileName = newMovement.file ? newMovement.file.name : 'Sin adjunto';
+        // Convert all selected files to dataUri
+        const attachedFiles = [];
+        for (const f of (newMovement.files || [])) {
+            try {
+                const uri = await fileToDataUri(f);
+                attachedFiles.push({ name: f.name, dataUri: uri, type: f.type });
+            } catch (err) {
+                console.warn('Error reading movement file:', err);
+            }
+        }
 
+        // Primary evidence label (first file or 'Sin adjunto')
+        const evidenceLabel = attachedFiles.length > 0
+            ? attachedFiles.map(f => f.name).join(', ')
+            : 'Sin adjunto';
+
+        // Build movement object
         const movement = {
-            id: selectedPolicy.movements.length + 1,
+            id: editingMovementId || `mov_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
             date: newMovement.date,
             type: newMovement.type,
             description: newMovement.description,
-            evidence: fileName
+            evidence: attachedFiles.length > 0
+                ? attachedFiles.map(f => f.name).join(', ')
+                : (editingMovementId
+                    ? (newMovement._existingFiles?.map(f => f.name).join(', ') || 'Sin adjunto')
+                    : 'Sin adjunto'),
+            // Merge existing files with newly added ones when editing
+            files: editingMovementId && newMovement._existingFiles?.length > 0 && attachedFiles.length === 0
+                ? newMovement._existingFiles
+                : attachedFiles.length > 0
+                    ? [...(editingMovementId ? (newMovement._existingFiles || []) : []), ...attachedFiles]
+                    : (editingMovementId ? (newMovement._existingFiles || []) : []),
+            dataUri: attachedFiles[0]?.dataUri || newMovement._existingFiles?.[0]?.dataUri || null,
+            // Renewal-specific metadata
+            ...(newMovement.type === 'Renovación' ? {
+                renewalNewStart: newMovement.renewalNewStart,
+                renewalNewEnd: newMovement.renewalNewEnd,
+                renewalNewAmount: newMovement.renewalNewAmount,
+                renewalNewCurrency: newMovement.renewalNewCurrency,
+                renewalNewPolicyNumber: newMovement.renewalNewPolicyNumber,
+                renewalNote: newMovement.renewalNote
+            } : {})
         };
+
+        // Save each file to the document repository
+        for (const f of attachedFiles) {
+            saveDocumentForEntity('policy', selectedPolicy.id, {
+                name: f.name,
+                category: `Movimiento: ${newMovement.type}`,
+                date: newMovement.date,
+                dataUri: f.dataUri,
+                notes: newMovement.description,
+                movementType: newMovement.type,
+                uploadedBy: 'Gestión de Movimientos'
+            });
+        }
+
+        // If Renewal, update policy end date and start date
+        let policyUpdates = {};
+        if (newMovement.type === 'Renovación') {
+            if (newMovement.renewalNewEnd) policyUpdates.endDate = newMovement.renewalNewEnd;
+            if (newMovement.renewalNewStart) policyUpdates.startDate = newMovement.renewalNewStart;
+            if (newMovement.renewalNewPolicyNumber) policyUpdates.id = newMovement.renewalNewPolicyNumber;
+            if (newMovement.renewalNewAmount) policyUpdates.amount = parseFloat(newMovement.renewalNewAmount);
+            if (newMovement.renewalNewCurrency) policyUpdates.currency = newMovement.renewalNewCurrency;
+        }
+
+        const updatedMovements = editingMovementId
+            ? (selectedPolicy.movements || []).map(m => m.id === editingMovementId ? movement : m)
+            : [...(selectedPolicy.movements || []), movement];
 
         const updatedPolicy = {
             ...selectedPolicy,
-            movements: [...selectedPolicy.movements, movement]
+            ...policyUpdates,
+            movements: updatedMovements
         };
 
         setSelectedPolicy(updatedPolicy);
+        setPolicies(policies.map(p => p.id === selectedPolicy.id ? updatedPolicy : p));
 
-        setPolicies(policies.map(p => p.id === updatedPolicy.id ? updatedPolicy : p));
+        if (!isDemo) {
+            try {
+                await insertMovimientoHasura({
+                    polizaId: selectedPolicy.rawId || selectedPolicy.id,
+                    date: newMovement.date,
+                    type: newMovement.type,
+                    description: newMovement.description,
+                    evidence: evidenceLabel
+                }, isDemo);
+            } catch (err) {
+                console.warn('Error inserting movement in Hasura:', err);
+            }
+        }
 
+        const movType = newMovement.type;
+        const wasEditing = !!editingMovementId;
         setShowMovementModal(false);
+        setEditingMovementId(null);
         setNewMovement({
             type: 'Endoso',
             date: new Date().toISOString().split('T')[0],
             description: '',
-            file: null
+            files: [],
+            renewalNewStart: '',
+            renewalNewEnd: '',
+            renewalNewAmount: '',
+            renewalNewCurrency: 'DOP',
+            renewalNewPolicyNumber: '',
+            renewalNote: ''
         });
 
-        alert('Movimiento registrado correctamente.');
+        alert(wasEditing ? `Movimiento de "${movType}" actualizado.` : `Movimiento de "${movType}" registrado correctamente.`);
+    };
+
+    // Open movement modal for EDITING an existing movement
+    const handleOpenEditMovement = (mov) => {
+        setEditingMovementId(mov.id);
+        setNewMovement({
+            type: mov.type,
+            date: mov.date,
+            description: mov.description,
+            files: [],  // existing files stay as-is; user can add new ones
+            renewalNewStart: mov.renewalNewStart || '',
+            renewalNewEnd: mov.renewalNewEnd || '',
+            renewalNewAmount: mov.renewalNewAmount || '',
+            renewalNewCurrency: mov.renewalNewCurrency || 'DOP',
+            renewalNewPolicyNumber: mov.renewalNewPolicyNumber || '',
+            renewalNote: mov.renewalNote || '',
+            // keep existing files reference so we preserve them
+            _existingFiles: mov.files || (mov.dataUri ? [{ name: mov.evidence, dataUri: mov.dataUri, type: '' }] : [])
+        });
+        setShowMovementModal(true);
+    };
+
+    // Delete a movement
+    const handleDeleteMovement = (movId) => {
+        if (!window.confirm('¿Eliminar este movimiento? Esta acción no se puede deshacer.')) return;
+        const updatedPolicy = {
+            ...selectedPolicy,
+            movements: (selectedPolicy.movements || []).filter(m => m.id !== movId)
+        };
+        setSelectedPolicy(updatedPolicy);
+        setPolicies(policies.map(p => p.id === selectedPolicy.id ? updatedPolicy : p));
+    };
+
+    const openEditPolicyModal = (policy) => {
+        if (!policy) return;
+        setEditPolicyForm({
+            id: policy.id || '',
+            rawId: policy.rawId || policy.dbId || policy.id,
+            client: policy.client || '',
+            clienteId: policy.clienteId || null,
+            insurer: policy.insurer || 'La Colonial de Seguros',
+            type: policy.type || 'Vehículo',
+            cartera: policy.cartera || 'Santiago Morales y Asociados, S.R.L.',
+            agentCode: policy.agentCode || (policy.cartera?.includes('Raquel') ? '897' : '8055'),
+            insuredAmount: policy.insuredAmount !== undefined ? String(policy.insuredAmount) : '',
+            amount: policy.amount !== undefined ? String(policy.amount) : '',
+            currency: policy.currency || 'DOP',
+            renewalFrequency: policy.renewalFrequency || 'Anual',
+            startDate: policy.startDate || '',
+            lastRenewalDate: policy.lastRenewalDate || policy.startDate || '',
+            endDate: policy.endDate || policy.renewal || '',
+            details: policy.details || '',
+            status: policy.status || 'Active'
+        });
+        setShowEditPolicyModal(true);
+    };
+
+    const handleSaveEditedPolicy = async (e) => {
+        e.preventDefault();
+        setIsSavingPolicy(true);
+        try {
+            const cleanAmount = parseFloat(String(editPolicyForm.amount || '0').replace(/[^0-9.-]+/g, '')) || 0;
+            const cleanInsured = parseFloat(String(editPolicyForm.insuredAmount || '0').replace(/[^0-9.-]+/g, '')) || 0;
+
+            const updatedPolicyObj = {
+                ...selectedPolicy,
+                ...editPolicyForm,
+                amount: cleanAmount,
+                insuredAmount: cleanInsured,
+                renewal: editPolicyForm.endDate,
+            };
+
+            const targetDbId = selectedPolicy.rawId || selectedPolicy.dbId || selectedPolicy.id;
+
+            if (!isDemo && targetDbId) {
+                try {
+                    await updatePolicyHasura(targetDbId, {
+                        ...editPolicyForm,
+                        amount: cleanAmount,
+                        insuredAmount: cleanInsured,
+                    }, isDemo);
+                } catch (err) {
+                    console.warn('Error saving edited policy to Hasura:', err);
+                }
+            }
+
+            // Update in policies state
+            setPolicies(prev => prev.map(p => (p.id === selectedPolicy.id || (targetDbId && p.rawId === targetDbId)) ? updatedPolicyObj : p));
+            setSelectedPolicy(updatedPolicyObj);
+            setShowEditPolicyModal(false);
+            alert(`Póliza ${editPolicyForm.id} actualizada correctamente.`);
+        } catch (error) {
+            console.error('Error updating policy:', error);
+            alert('Error al guardar los cambios de la póliza.');
+        } finally {
+            setIsSavingPolicy(false);
+        }
+    };
+
+    const renderEditPolicyModalContent = () => {
+        if (!showEditPolicyModal) return null;
+        return (
+            <div style={{
+                position: 'fixed',
+                top: 0, left: 0, right: 0, bottom: 0,
+                backgroundColor: 'rgba(0,0,0,0.5)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                zIndex: 1000,
+                padding: '1rem'
+            }}>
+                <div className="card" style={{
+                    width: '100%',
+                    maxWidth: '780px',
+                    backgroundColor: 'white',
+                    position: 'relative',
+                    maxHeight: '90vh',
+                    overflowY: 'auto',
+                    borderRadius: 'var(--radius-lg)',
+                    padding: '1.75rem'
+                }}>
+                    <button
+                        onClick={() => setShowEditPolicyModal(false)}
+                        style={{ position: 'absolute', top: '1.25rem', right: '1.25rem', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}
+                        title="Cerrar"
+                    >
+                        <X size={24} />
+                    </button>
+
+                    <div style={{ marginBottom: '1.5rem', borderBottom: '1px solid var(--border)', paddingBottom: '1rem' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                            <div style={{ width: '36px', height: '36px', borderRadius: '50%', backgroundColor: '#eff6ff', color: '#2563eb', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                <Edit size={20} />
+                            </div>
+                            <div>
+                                <h3 style={{ margin: 0, color: 'var(--primary)', fontSize: '1.4rem' }}>
+                                    Editar Póliza: {editPolicyForm.id}
+                                </h3>
+                                <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                                    Modifica datos generales, aseguradora, vigencias, prima y cartera asignada.
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <form onSubmit={handleSaveEditedPolicy} style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                        {/* Bloque 1: Identificación y Cliente */}
+                        <div style={{ backgroundColor: '#f8fafc', padding: '1rem 1.25rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
+                            <h4 style={{ margin: '0 0 0.85rem 0', fontSize: '0.92rem', color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '0.4rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                                <FileText size={15} /> 1. Datos de la Póliza y Cliente
+                            </h4>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+                                <div>
+                                    <label style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-main)', display: 'block', marginBottom: '0.35rem' }}>
+                                        Número de Póliza *
+                                    </label>
+                                    <input
+                                        type="text"
+                                        required
+                                        value={editPolicyForm.id}
+                                        onChange={e => setEditPolicyForm({ ...editPolicyForm, id: e.target.value })}
+                                        style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', fontWeight: '600' }}
+                                    />
+                                </div>
+                                <div>
+                                    <label style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-main)', display: 'block', marginBottom: '0.35rem' }}>
+                                        Cliente Titular
+                                    </label>
+                                    <select
+                                        value={editPolicyForm.clienteId || ''}
+                                        onChange={e => {
+                                            const selectedId = e.target.value ? parseInt(e.target.value, 10) : null;
+                                            const matchClient = clients.find(c => c.id === selectedId);
+                                            setEditPolicyForm({
+                                                ...editPolicyForm,
+                                                clienteId: selectedId,
+                                                client: matchClient ? matchClient.name : editPolicyForm.client
+                                            });
+                                        }}
+                                        style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', fontWeight: '600' }}
+                                    >
+                                        <option value="">{editPolicyForm.client || '— Seleccionar Cliente —'}</option>
+                                        {clients.map(c => (
+                                            <option key={c.id} value={c.id}>
+                                                {c.name} {c.documentId ? `(${c.documentId})` : ''}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Bloque 2: Aseguradora, Ramo y Cartera */}
+                        <div style={{ backgroundColor: '#f8fafc', padding: '1rem 1.25rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
+                            <h4 style={{ margin: '0 0 0.85rem 0', fontSize: '0.92rem', color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '0.4rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                                <Briefcase size={15} /> 2. Aseguradora y Asignación de Cartera
+                            </h4>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+                                <div>
+                                    <label style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-main)', display: 'block', marginBottom: '0.35rem' }}>
+                                        Compañía Aseguradora *
+                                    </label>
+                                    <select
+                                        value={editPolicyForm.insurer}
+                                        onChange={e => {
+                                            const newInsurer = e.target.value;
+                                            const matchCode = (agentCodes || []).find(ac =>
+                                                (ac.insurer || ac.compania || '').toLowerCase().includes(newInsurer.toLowerCase()) ||
+                                                newInsurer.toLowerCase().includes((ac.insurer || ac.compania || '').toLowerCase())
+                                            );
+                                            setEditPolicyForm({
+                                                ...editPolicyForm,
+                                                insurer: newInsurer,
+                                                agentCode: matchCode ? (matchCode.code || matchCode.codigo) : editPolicyForm.agentCode
+                                            });
+                                        }}
+                                        style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', fontWeight: '600' }}
+                                    >
+                                        <option value="La Colonial de Seguros">La Colonial de Seguros</option>
+                                        <option value="Humano Seguros">Humano Seguros</option>
+                                        <option value="Seguros Universal">Seguros Universal</option>
+                                        <option value="Mapfre BHD Seguros">Mapfre BHD Seguros</option>
+                                        <option value="Seguros Reservas">Seguros Reservas</option>
+                                        <option value="Seguros Sura">Seguros Sura</option>
+                                        <option value="General de Seguros">General de Seguros</option>
+                                        <option value="Dominicana de Seguros">Dominicana de Seguros</option>
+                                        <option value="Patria Compañía de Seguros">Patria Compañía de Seguros</option>
+                                        <option value="Seguros Pepín">Seguros Pepín</option>
+                                        <option value="La Monumental de Seguros">La Monumental de Seguros</option>
+                                        <option value="CoopSeguros">CoopSeguros</option>
+                                    </select>
+                                </div>
+
+                                <div>
+                                    <label style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-main)', display: 'block', marginBottom: '0.35rem' }}>
+                                        Ramo / Tipo de Seguro *
+                                    </label>
+                                    <select
+                                        value={editPolicyForm.type}
+                                        onChange={e => setEditPolicyForm({ ...editPolicyForm, type: e.target.value })}
+                                        style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', fontWeight: '600' }}
+                                    >
+                                        <option value="Vehículo">Vehículos de Motor / Auto</option>
+                                        <option value="Salud">Seguro Médico / Salud</option>
+                                        <option value="Incendio y Líneas Aliadas">Incendio y Líneas Aliadas</option>
+                                        <option value="Vida">Seguro de Vida</option>
+                                        <option value="Responsabilidad Civil">Responsabilidad Civil</option>
+                                        <option value="Transporte de Carga">Transporte de Carga</option>
+                                        <option value="Fidelidad / Fianzas">Fidelidad / Fianzas</option>
+                                        <option value="Otros">Otros Ramos Generales</option>
+                                    </select>
+                                </div>
+
+                                <div>
+                                    <label style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-main)', display: 'block', marginBottom: '0.35rem' }}>
+                                        Cartera de Agente
+                                    </label>
+                                    <select
+                                        value={editPolicyForm.cartera}
+                                        onChange={e => {
+                                            const newCartera = e.target.value;
+                                            const isRaquel = newCartera.includes('Raquel');
+                                            setEditPolicyForm({
+                                                ...editPolicyForm,
+                                                cartera: newCartera,
+                                                agentCode: isRaquel ? '897' : '8055'
+                                            });
+                                        }}
+                                        style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', fontWeight: '600' }}
+                                    >
+                                        <option value="Santiago Morales y Asociados, S.R.L.">💼 Santiago Morales y Asociados, S.R.L.</option>
+                                        <option value="Raquel Rodríguez">💼 Raquel Rodríguez</option>
+                                    </select>
+                                </div>
+
+                                <div>
+                                    <label style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-main)', display: 'block', marginBottom: '0.35rem' }}>
+                                        Código de Corredor en Aseguradora
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={editPolicyForm.agentCode}
+                                        onChange={e => setEditPolicyForm({ ...editPolicyForm, agentCode: e.target.value })}
+                                        placeholder="Ej: 8055, 897, 76713..."
+                                        style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', fontWeight: '600' }}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Bloque 3: Fechas de Vigencia */}
+                        <div style={{ backgroundColor: '#f8fafc', padding: '1rem 1.25rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
+                            <h4 style={{ margin: '0 0 0.85rem 0', fontSize: '0.92rem', color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '0.4rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                                <RotateCw size={15} /> 3. Fechas de Vigencia y Renovación
+                            </h4>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' }}>
+                                <div>
+                                    <label style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-main)', display: 'block', marginBottom: '0.35rem' }}>
+                                        1. Fecha Inicio Original
+                                    </label>
+                                    <input
+                                        type="date"
+                                        value={editPolicyForm.startDate}
+                                        onChange={e => setEditPolicyForm({ ...editPolicyForm, startDate: e.target.value })}
+                                        style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}
+                                    />
+                                </div>
+                                <div>
+                                    <label style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-main)', display: 'block', marginBottom: '0.35rem' }}>
+                                        2. Última Renovación (Inicio Vigencia)
+                                    </label>
+                                    <input
+                                        type="date"
+                                        value={editPolicyForm.lastRenewalDate}
+                                        onChange={e => setEditPolicyForm({ ...editPolicyForm, lastRenewalDate: e.target.value })}
+                                        style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}
+                                    />
+                                </div>
+                                <div>
+                                    <label style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-main)', display: 'block', marginBottom: '0.35rem' }}>
+                                        3. Próxima Renovación (Fin Vigencia) *
+                                    </label>
+                                    <input
+                                        type="date"
+                                        required
+                                        value={editPolicyForm.endDate}
+                                        onChange={e => setEditPolicyForm({ ...editPolicyForm, endDate: e.target.value })}
+                                        style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', fontWeight: '600' }}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Bloque 4: Valores Económicos y Frecuencia */}
+                        <div style={{ backgroundColor: '#f8fafc', padding: '1rem 1.25rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
+                            <h4 style={{ margin: '0 0 0.85rem 0', fontSize: '0.92rem', color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '0.4rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                                <DollarSign size={15} /> 4. Valores Económicos y Pago
+                            </h4>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' }}>
+                                <div>
+                                    <label style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-main)', display: 'block', marginBottom: '0.35rem' }}>
+                                        Monto Asegurado (Suma Asegurada)
+                                    </label>
+                                    <input
+                                        type="number"
+                                        step="any"
+                                        value={editPolicyForm.insuredAmount}
+                                        onChange={e => setEditPolicyForm({ ...editPolicyForm, insuredAmount: e.target.value })}
+                                        placeholder="0.00"
+                                        style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}
+                                    />
+                                </div>
+                                <div>
+                                    <label style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-main)', display: 'block', marginBottom: '0.35rem' }}>
+                                        Prima Anual *
+                                    </label>
+                                    <input
+                                        type="number"
+                                        step="any"
+                                        required
+                                        value={editPolicyForm.amount}
+                                        onChange={e => setEditPolicyForm({ ...editPolicyForm, amount: e.target.value })}
+                                        placeholder="0.00"
+                                        style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', fontWeight: '700' }}
+                                    />
+                                </div>
+                                <div>
+                                    <label style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-main)', display: 'block', marginBottom: '0.35rem' }}>
+                                        Frecuencia de Pago
+                                    </label>
+                                    <select
+                                        value={editPolicyForm.renewalFrequency}
+                                        onChange={e => setEditPolicyForm({ ...editPolicyForm, renewalFrequency: e.target.value })}
+                                        style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}
+                                    >
+                                        <option value="Anual">Anual</option>
+                                        <option value="Semestral">Semestral</option>
+                                        <option value="Trimestral">Trimestral</option>
+                                        <option value="Mensual">Mensual</option>
+                                        <option value="Contado">Contado</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div style={{ marginTop: '1rem' }}>
+                                <label style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-main)', display: 'block', marginBottom: '0.35rem' }}>
+                                    Detalles / Cobertura de la Póliza
+                                </label>
+                                <textarea
+                                    rows={2}
+                                    value={editPolicyForm.details}
+                                    onChange={e => setEditPolicyForm({ ...editPolicyForm, details: e.target.value })}
+                                    placeholder="Descripción de cobertura, vehículo (marca, modelo, placa, chasis), etc."
+                                    style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}
+                                />
+                            </div>
+                        </div>
+
+                        {/* Botones de Acción */}
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', marginTop: '0.5rem', borderTop: '1px solid var(--border)', paddingTop: '1.25rem' }}>
+                            <button
+                                type="button"
+                                className="btn"
+                                onClick={() => setShowEditPolicyModal(false)}
+                                disabled={isSavingPolicy}
+                                style={{ border: '1px solid var(--border)', padding: '0.6rem 1.25rem' }}
+                            >
+                                Cancelar
+                            </button>
+                            <button
+                                type="submit"
+                                className="btn btn-primary"
+                                disabled={isSavingPolicy}
+                                style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.6rem 1.5rem', fontWeight: '700' }}
+                            >
+                                {isSavingPolicy ? (
+                                    <>
+                                        <Loader2 className="animate-spin" size={18} /> Guardando Cambios...
+                                    </>
+                                ) : (
+                                    <>
+                                        <Save size={18} /> Guardar Cambios
+                                    </>
+                                )}
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        );
     };
 
     if (selectedPolicy) {
@@ -256,24 +1095,161 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
         const StatusIcon = statusConfirm.icon;
 
         const paymentStats = getPolicyPaymentStats(selectedPolicy, payments);
-        const policyPayments = payments.filter(p => p.policyId === selectedPolicy.id);
+        const policyPayments = payments.filter(p => p.policyId === selectedPolicy.id || p.polizaId === selectedPolicy.rawId || p.polizaId === selectedPolicy.id);
+        const policyClaims = getPolicyClaims(selectedPolicy, claims);
+        const policyOpenClaims = policyClaims.filter(isOpenClaim);
 
         return (
             <div>
-                <div style={{ marginBottom: '2rem' }}>
-                    <button
-                        className="btn"
-                        style={{ marginBottom: '1rem', padding: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-muted)' }}
-                        onClick={() => setSelectedPolicy(null)}
-                    >
-                        <ArrowLeft size={20} /> Volver al listado
-                    </button>
-                    <h2 style={{ fontSize: '2rem', color: 'var(--primary)' }}>Detalle de Póliza</h2>
-                    <p style={{ color: 'var(--text-muted)' }}>Información completa y documentos adjuntos.</p>
+                <div style={{ marginBottom: '2rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', flexWrap: 'wrap', gap: '1rem' }}>
+                    <div>
+                        <button
+                            className="btn"
+                            style={{ marginBottom: '0.75rem', padding: '0.4rem 0.65rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-muted)' }}
+                            onClick={() => setSelectedPolicy(null)}
+                        >
+                            <ArrowLeft size={18} /> Volver al listado
+                        </button>
+                        <h2 style={{ fontSize: '2rem', color: 'var(--primary)', margin: 0 }}>Detalle de Póliza</h2>
+                        <p style={{ color: 'var(--text-muted)', margin: '0.25rem 0 0 0' }}>Información completa, coberturas y edición.</p>
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                        <button
+                            className="btn btn-primary"
+                            onClick={() => openEditPolicyModal(selectedPolicy)}
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', padding: '0.6rem 1.25rem', fontWeight: '700', fontSize: '0.92rem' }}
+                        >
+                            <Edit size={16} /> Editar Póliza
+                        </button>
+                    </div>
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '2rem' }}>
                     <div className="card">
+                        {/* Alerta si la póliza tiene SINIESTRO ABIERTO */}
+                        {policyOpenClaims.length > 0 && (
+                            <div style={{
+                                backgroundColor: '#fef2f2',
+                                border: '1.5px solid #fca5a5',
+                                borderRadius: 'var(--radius-md)',
+                                padding: '1.25rem',
+                                marginBottom: '1.5rem',
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                gap: '1rem',
+                                flexWrap: 'wrap',
+                                boxShadow: '0 2px 8px rgba(220, 38, 38, 0.08)'
+                            }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                    <div style={{
+                                        width: '38px',
+                                        height: '38px',
+                                        borderRadius: '50%',
+                                        backgroundColor: '#fee2e2',
+                                        color: '#dc2626',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        flexShrink: 0
+                                    }}>
+                                        <ShieldAlert size={22} />
+                                    </div>
+                                    <div>
+                                        <strong style={{ color: '#991b1b', fontSize: '1.05rem', display: 'block' }}>
+                                            🚨 Atención: Siniestro Abierto en Curso ({policyOpenClaims.length})
+                                        </strong>
+                                        <span style={{ fontSize: '0.85rem', color: '#7f1d1d' }}>
+                                            {policyOpenClaims.map(c => `${c.id}: ${c.type} (${c.status}) · Reclamado: ${c.amount || 'N/D'}`).join(' | ')}
+                                        </span>
+                                    </div>
+                                </div>
+                                {onNavigateToClaim && (
+                                    <button
+                                        className="btn"
+                                        onClick={() => onNavigateToClaim(policyOpenClaims[0].id)}
+                                        style={{
+                                            backgroundColor: '#dc2626',
+                                            color: 'white',
+                                            fontWeight: '700',
+                                            fontSize: '0.85rem',
+                                            padding: '0.5rem 1rem',
+                                            boxShadow: '0 2px 4px rgba(220, 38, 38, 0.3)'
+                                        }}
+                                    >
+                                        Ver en Siniestros
+                                    </button>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Alerta si la póliza está CANCELADA */}
+                        {computedStatus === 'Cancelled' && (
+                            <div style={{
+                                backgroundColor: '#fee2e2',
+                                border: '1.5px solid #f87171',
+                                borderRadius: 'var(--radius-md)',
+                                padding: '1.25rem',
+                                marginBottom: '1.5rem',
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                flexWrap: 'wrap',
+                                gap: '1rem'
+                            }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                    <XCircle size={28} color="#991b1b" />
+                                    <div>
+                                        <strong style={{ color: '#991b1b', fontSize: '1.05rem', display: 'block' }}>Póliza Cancelada por Falta de Pago</strong>
+                                        <span style={{ fontSize: '0.85rem', color: '#7f1d1d' }}>
+                                            La vigencia de esta póliza finalizó sin registrar pagos. Puedes reabrirla y reactivarla como vigente cuando lo necesites.
+                                        </span>
+                                    </div>
+                                </div>
+                                <button
+                                    className="btn"
+                                    onClick={() => handleReactivatePolicy(selectedPolicy)}
+                                    style={{
+                                        backgroundColor: '#166534',
+                                        color: 'white',
+                                        fontWeight: '700',
+                                        padding: '0.65rem 1.25rem',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '0.5rem',
+                                        borderRadius: 'var(--radius-sm)',
+                                        boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                                    }}
+                                >
+                                    <RotateCw size={16} /> Reabrir Póliza como Vigente
+                                </button>
+                            </div>
+                        )}
+
+                        {/* Alerta si la póliza tiene PAGO PENDIENTE */}
+                        {computedStatus === 'Pending' && (
+                            <div style={{
+                                backgroundColor: '#fef9c3',
+                                border: '1.5px solid #facc15',
+                                borderRadius: 'var(--radius-md)',
+                                padding: '1.25rem',
+                                marginBottom: '1.5rem',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.75rem'
+                            }}>
+                                <AlertTriangle size={28} color="#854d0e" />
+                                <div>
+                                    <strong style={{ color: '#854d0e', fontSize: '1.05rem', display: 'block' }}>
+                                        Alerta de Renovación: Póliza Vencida con Balance Pendiente ({formatMoney(paymentStats.totalOwed, selectedPolicy.currency)})
+                                    </strong>
+                                    <span style={{ fontSize: '0.85rem', color: '#713f12' }}>
+                                        La fecha final de vigencia venció y cuenta con un saldo pendiente por liquidar. Al registrar el pago completo, el sistema renovará automáticamente su vigencia.
+                                    </span>
+                                </div>
+                            </div>
+                        )}
+
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '1.5rem', borderBottom: '1px solid var(--border)', paddingBottom: '1rem' }}>
                             <div>
                                 <h3 style={{ fontSize: '1.5rem', color: 'var(--primary)', display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
@@ -282,50 +1258,87 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
                                 </h3>
                                 <p style={{ fontSize: '1.1rem', marginTop: '0.25rem' }}>{selectedPolicy.client}</p>
                             </div>
-                            <span style={{
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '0.25rem',
-                                padding: '0.5rem 1rem',
-                                borderRadius: '999px',
-                                fontSize: '1rem',
-                                fontWeight: '600',
-                                backgroundColor: statusConfirm.bg,
-                                color: statusConfirm.text
-                            }}>
-                                <StatusIcon size={18} />
-                                {computedStatus === 'Active' ? 'Vigente' : computedStatus === 'Pending' ? 'Pendiente' : computedStatus === 'Expiring' ? 'Por Vencer' : 'Cancelada'}
-                            </span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                <button
+                                    className="btn"
+                                    onClick={() => openEditPolicyModal(selectedPolicy)}
+                                    style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '0.4rem',
+                                        padding: '0.45rem 0.9rem',
+                                        fontSize: '0.85rem',
+                                        fontWeight: '700',
+                                        border: '1px solid var(--border)',
+                                        backgroundColor: '#ffffff'
+                                    }}
+                                    title="Editar póliza"
+                                >
+                                    <Edit size={15} /> Editar
+                                </button>
+                                <span style={{
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '0.25rem',
+                                    padding: '0.5rem 1rem',
+                                    borderRadius: '999px',
+                                    fontSize: '1rem',
+                                    fontWeight: '600',
+                                    backgroundColor: statusConfirm.bg,
+                                    color: statusConfirm.text
+                                }}>
+                                    <StatusIcon size={18} />
+                                    {computedStatus === 'Active' ? 'Vigente' : computedStatus === 'Pending' ? 'Pendiente' : computedStatus === 'Expiring' ? 'Por Vencer' : 'Cancelada'}
+                                </span>
+                            </div>
                         </div>
 
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
                             <div>
-                                <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Número de Póliza</p>
-                                <p style={{ fontWeight: '600', fontSize: '1.1rem' }}>{selectedPolicy.id}</p>
+                                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '0.2rem' }}>Número de Póliza</p>
+                                <p style={{ fontWeight: '700', fontSize: '1.1rem', margin: 0, color: 'var(--primary)' }}>{selectedPolicy.id}</p>
+                            </div>
+                            <div style={{ backgroundColor: '#eff6ff', padding: '0.75rem 1rem', borderRadius: 'var(--radius-sm)', border: '1px solid #bfdbfe' }}>
+                                <p style={{ color: '#1e40af', fontSize: '0.75rem', fontWeight: '700', textTransform: 'uppercase', marginBottom: '0.2rem', marginTop: 0, display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                                    <Briefcase size={14} /> Cartera de Agente
+                                </p>
+                                <p style={{ fontWeight: '700', fontSize: '1.05rem', color: '#1e3a8a', margin: 0 }}>
+                                    {selectedPolicy.cartera || 'Santiago Morales y Asociados, S.R.L.'}
+                                </p>
+                                <span style={{ fontSize: '0.78rem', color: '#3b82f6', fontWeight: '600' }}>
+                                    Código en {selectedPolicy.insurer || 'Aseguradora'}: <strong style={{ color: '#1e3a8a' }}>{selectedPolicy.agentCode || 'N/A'}</strong>
+                                </span>
                             </div>
                             <div>
-                                <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Monto Asegurado</p>
-                                <p style={{ fontWeight: '600', fontSize: '1.1rem' }}>{formatMoney(selectedPolicy.insuredAmount, selectedPolicy.currency)}</p>
+                                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '0.2rem' }}>Monto Asegurado</p>
+                                <p style={{ fontWeight: '600', fontSize: '1.1rem', margin: 0 }}>{formatMoney(selectedPolicy.insuredAmount, selectedPolicy.currency)}</p>
                             </div>
                             <div>
-                                <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Prima (Monto)</p>
-                                <p style={{ fontWeight: '600', fontSize: '1.1rem' }}>{formatMoney(selectedPolicy.amount, selectedPolicy.currency)}</p>
+                                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '0.2rem' }}>Prima (Monto)</p>
+                                <p style={{ fontWeight: '700', fontSize: '1.1rem', color: 'var(--primary)', margin: 0 }}>{formatMoney(selectedPolicy.amount, selectedPolicy.currency)}</p>
                             </div>
                             <div>
-                                <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Fecha de Inicio</p>
-                                <p style={{ fontWeight: '600', fontSize: '1.1rem' }}>{formatDateToDDMMYYYY(selectedPolicy.startDate) || 'N/A'}</p>
+                                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '0.2rem' }}>Frecuencia de Pago</p>
+                                <p style={{ fontWeight: '600', fontSize: '1rem', margin: 0 }}>{selectedPolicy.renewalFrequency || 'Anual'}</p>
                             </div>
                             <div>
-                                <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Frecuencia de Renovación</p>
-                                <p style={{ fontWeight: '600', fontSize: '1.1rem' }}>{selectedPolicy.renewalFrequency || 'Anual'}</p>
+                                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '0.2rem' }}>Detalles de Cobertura</p>
+                                <p style={{ fontWeight: '600', fontSize: '0.95rem', margin: 0 }}>{selectedPolicy.details}</p>
                             </div>
-                            <div>
-                                <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Próxima Renovación</p>
-                                <p style={{ fontWeight: '600', fontSize: '1.1rem' }}>{formatDateToDDMMYYYY(getNextRenewalDate(selectedPolicy.startDate, selectedPolicy.renewalFrequency) || selectedPolicy.renewal || 'N/A')}</p>
+                            <div style={{ backgroundColor: '#f8fafc', padding: '0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid #e2e8f0' }}>
+                                <p style={{ color: 'var(--text-muted)', fontSize: '0.75rem', fontWeight: '700', textTransform: 'uppercase', marginBottom: '0.2rem', marginTop: 0 }}>1. Fecha Inicio Original</p>
+                                <p style={{ fontWeight: '700', fontSize: '1rem', color: 'var(--text-main)', margin: 0 }}>{formatDateToDDMMYYYY(selectedPolicy.startDate) || 'N/A'}</p>
+                                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Contratación inicial</span>
                             </div>
-                            <div>
-                                <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Detalles de Cobertura</p>
-                                <p style={{ fontWeight: '600', fontSize: '1rem' }}>{selectedPolicy.details}</p>
+                            <div style={{ backgroundColor: '#f8fafc', padding: '0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid #e2e8f0' }}>
+                                <p style={{ color: 'var(--text-muted)', fontSize: '0.75rem', fontWeight: '700', textTransform: 'uppercase', marginBottom: '0.2rem', marginTop: 0 }}>2. Última Renovación</p>
+                                <p style={{ fontWeight: '700', fontSize: '1rem', color: '#0369a1', margin: 0 }}>{formatDateToDDMMYYYY(selectedPolicy.lastRenewalDate || selectedPolicy.startDate) || 'N/A'}</p>
+                                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Inicio de vigencia actual</span>
+                            </div>
+                            <div style={{ gridColumn: 'span 2', backgroundColor: computedStatus === 'Active' ? '#f0fdf4' : computedStatus === 'Expiring' ? '#fffbeb' : '#fef2f2', padding: '0.85rem', borderRadius: 'var(--radius-sm)', border: `1px solid ${statusConfirm.bg}` }}>
+                                <p style={{ color: statusConfirm.text, fontSize: '0.75rem', fontWeight: '700', textTransform: 'uppercase', marginBottom: '0.2rem', marginTop: 0 }}>3. Próxima Renovación (Fecha Final)</p>
+                                <p style={{ fontWeight: '700', fontSize: '1.15rem', color: statusConfirm.text, margin: 0 }}>{formatDateToDDMMYYYY(selectedPolicy.endDate || selectedPolicy.renewal || 'N/A')}</p>
+                                <span style={{ fontSize: '0.75rem', color: statusConfirm.text }}>Fin de vigencia actual (Renueva)</span>
                             </div>
                         </div>
 
@@ -359,92 +1372,317 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
                         </div>
                     </div>
 
-                    <div className="card" style={{ backgroundColor: '#f8fafc' }}>
-                        <h3 style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <FileText size={20} /> Documentos
-                        </h3>
-                        <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', marginBottom: '1.5rem' }}>
-                            Accede a los archivos digitales almacenados en la nube.
-                        </p>
+                    <div className="card" style={{ backgroundColor: '#f8fafc', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                        <div>
+                            <h3 style={{ marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.2rem', color: 'var(--primary)' }}>
+                                <Briefcase size={20} /> Acciones y Carpeta Digital
+                            </h3>
+                            <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1.25rem' }}>
+                                Gestiona la carpeta en la nube y la información oficial de esta póliza.
+                            </p>
 
-                        <a
-                            href={getDriveLink(selectedPolicy)}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="btn btn-primary"
-                            style={{ width: '100%', justifyContent: 'center' }}
-                        >
-                            <ExternalLink size={20} /> Buscar en Google Drive
-                        </a>
+                            <a
+                                href={getDriveLink(selectedPolicy)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="btn btn-primary"
+                                style={{ width: '100%', justifyContent: 'center', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.65rem 1rem' }}
+                            >
+                                <ExternalLink size={18} /> Abrir Carpeta en Google Drive
+                            </a>
+
+                            <button
+                                type="button"
+                                onClick={() => openEditPolicyModal(selectedPolicy)}
+                                className="btn"
+                                style={{
+                                    width: '100%',
+                                    justifyContent: 'center',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '0.5rem',
+                                    padding: '0.65rem 1rem',
+                                    backgroundColor: '#ffffff',
+                                    border: '1.5px solid var(--border)',
+                                    fontWeight: '700',
+                                    fontSize: '0.88rem',
+                                    color: 'var(--text-main)'
+                                }}
+                            >
+                                <Edit size={16} color="var(--primary)" /> Editar Información de Póliza
+                            </button>
+                        </div>
 
                         <div style={{ marginTop: '1.5rem', borderTop: '1px solid var(--border)', paddingTop: '1rem' }}>
                             <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', padding: '0.75rem', backgroundColor: 'white', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
-                                <File size={24} color="var(--primary)" />
-                                <div style={{ flex: 1 }}>
-                                    <p style={{ fontSize: '0.9rem', fontWeight: '600' }}>Póliza Digital.pdf</p>
-                                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>PDF • 2.4 MB</p>
+                                <File size={22} color="var(--primary)" />
+                                <div style={{ flex: 1, overflow: 'hidden' }}>
+                                    <p style={{ fontSize: '0.88rem', fontWeight: '700', margin: 0, color: 'var(--primary)' }}>Expediente Digital</p>
+                                    <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: 0 }}>Archivos, recibos y soportes</p>
                                 </div>
-                                <a href={getDriveLink(selectedPolicy)} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary)' }}>
-                                    <ExternalLink size={16} />
-                                </a>
+                                <span style={{
+                                    fontSize: '0.75rem',
+                                    fontWeight: '700',
+                                    backgroundColor: '#dbeafe',
+                                    color: '#1e40af',
+                                    padding: '0.15rem 0.5rem',
+                                    borderRadius: '999px'
+                                }}>
+                                    {policyExtraDocs.length} doc(s)
+                                </span>
                             </div>
                         </div>
                     </div>
                 </div>
 
+                {/* Expediente y Documentación de la Póliza */}
+                <div style={{ marginTop: '2rem' }}>
+                    <div className="card" style={{ padding: '1.5rem' }}>
+                        <div style={{ marginBottom: '1.25rem' }}>
+                            <h3 style={{ fontSize: '1.4rem', color: 'var(--primary)', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                <FileText size={22} color="#2563eb" /> Expediente y Documentación de la Póliza
+                            </h3>
+                            <p style={{ color: 'var(--text-muted)', fontSize: '0.88rem', margin: '0.25rem 0 0 0' }}>
+                                Adjunta y visualiza documentos obligatorios según el tipo de póliza ({selectedPolicy.type}), tales como matrícula, inspección, licencia y recibos de pago.
+                            </p>
+                        </div>
+
+                        <DocumentManager
+                            entityType="policy"
+                            entityId={selectedPolicy.id}
+                            entityTitle={selectedPolicy.id}
+                            policyType={selectedPolicy.type}
+                            extraDocuments={policyExtraDocs}
+                        />
+                    </div>
+                </div>
+
                 {/* Movements History */}
                 <div style={{ marginTop: '2rem' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-                        <h3 style={{ fontSize: '1.5rem', color: 'var(--primary)' }}>Historial de Movimientos</h3>
-                        <button className="btn btn-primary" onClick={() => setShowMovementModal(true)}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.75rem' }}>
+                        <div>
+                            <h3 style={{ fontSize: '1.5rem', color: 'var(--primary)', margin: 0 }}>Historial de Movimientos</h3>
+                            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '0.2rem 0 0 0' }}>
+                                Endosos, renovaciones, inclusiones, exclusiones y pagos con sus documentos adjuntos.
+                            </p>
+                        </div>
+                        <button className="btn btn-primary" onClick={() => setShowMovementModal(true)} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                             <Plus size={18} /> Registrar Movimiento
                         </button>
+                    </div>
+
+                    {/* Filter Bar */}
+                    <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1rem', flexWrap: 'wrap', alignItems: 'center', backgroundColor: '#f8fafc', borderRadius: 'var(--radius-md)', padding: '0.85rem 1rem', border: '1px solid var(--border)' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: '0 0 auto' }}>
+                            <Filter size={15} color="var(--text-muted)" />
+                            <span style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-muted)' }}>FILTRAR:</span>
+                        </div>
+                        <select
+                            value={movFilterType}
+                            onChange={e => setMovFilterType(e.target.value)}
+                            style={{ fontSize: '0.85rem', padding: '0.35rem 0.65rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', backgroundColor: 'white', fontWeight: '600' }}
+                        >
+                            {['Todos','Endoso','Renovación','Cancelación','Reclamación','Pago','Inclusión','Exclusión','Otro'].map(t => (
+                                <option key={t} value={t}>{t}</option>
+                            ))}
+                        </select>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)', fontWeight: '600' }}>Desde:</span>
+                            <input
+                                type="date"
+                                value={movFilterFrom}
+                                onChange={e => setMovFilterFrom(e.target.value)}
+                                style={{ fontSize: '0.85rem', padding: '0.3rem 0.55rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}
+                            />
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)', fontWeight: '600' }}>Hasta:</span>
+                            <input
+                                type="date"
+                                value={movFilterTo}
+                                onChange={e => setMovFilterTo(e.target.value)}
+                                style={{ fontSize: '0.85rem', padding: '0.3rem 0.55rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}
+                            />
+                        </div>
+                        {(movFilterType !== 'Todos' || movFilterFrom || movFilterTo) && (
+                            <button
+                                onClick={() => { setMovFilterType('Todos'); setMovFilterFrom(''); setMovFilterTo(''); }}
+                                style={{ fontSize: '0.8rem', padding: '0.3rem 0.65rem', borderRadius: 'var(--radius-sm)', border: '1px solid #fca5a5', backgroundColor: '#fff1f2', color: '#dc2626', fontWeight: '700', cursor: 'pointer' }}
+                            >
+                                ✕ Limpiar
+                            </button>
+                        )}
+                        <span style={{ marginLeft: 'auto', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                            {(() => {
+                                const movs = selectedPolicy.movements || [];
+                                const filtered = movs.filter(m => {
+                                    if (movFilterType !== 'Todos' && m.type !== movFilterType) return false;
+                                    if (movFilterFrom && m.date < movFilterFrom) return false;
+                                    if (movFilterTo && m.date > movFilterTo) return false;
+                                    return true;
+                                });
+                                return `${filtered.length} de ${movs.length} movimiento${movs.length !== 1 ? 's' : ''}`;
+                            })()}
+                        </span>
                     </div>
 
                     <div className="card" style={{ padding: '0', overflow: 'hidden' }}>
                         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                             <thead>
-                                <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid var(--border)' }}>
-                                    <th style={{ padding: '1rem', textAlign: 'left', fontWeight: '600', color: 'var(--text-muted)' }}>Fecha</th>
-                                    <th style={{ padding: '1rem', textAlign: 'left', fontWeight: '600', color: 'var(--text-muted)' }}>Tipo</th>
-                                    <th style={{ padding: '1rem', textAlign: 'left', fontWeight: '600', color: 'var(--text-muted)' }}>Descripción</th>
-                                    <th style={{ padding: '1rem', textAlign: 'right', fontWeight: '600', color: 'var(--text-muted)' }}>Evidencia</th>
+                                <tr style={{ backgroundColor: '#f8fafc', borderBottom: '2px solid var(--border)' }}>
+                                    <th style={{ padding: '0.9rem 1rem', textAlign: 'left', fontWeight: '700', color: 'var(--text-muted)', fontSize: '0.8rem', textTransform: 'uppercase' }}>Fecha</th>
+                                    <th style={{ padding: '0.9rem 1rem', textAlign: 'left', fontWeight: '700', color: 'var(--text-muted)', fontSize: '0.8rem', textTransform: 'uppercase' }}>Tipo</th>
+                                    <th style={{ padding: '0.9rem 1rem', textAlign: 'left', fontWeight: '700', color: 'var(--text-muted)', fontSize: '0.8rem', textTransform: 'uppercase' }}>Descripción / Detalle</th>
+                                    <th style={{ padding: '0.9rem 1rem', textAlign: 'left', fontWeight: '700', color: 'var(--text-muted)', fontSize: '0.8rem', textTransform: 'uppercase' }}>Archivos Adjuntos</th>
+                                    <th style={{ padding: '0.9rem 1rem', textAlign: 'center', fontWeight: '700', color: 'var(--text-muted)', fontSize: '0.8rem', textTransform: 'uppercase' }}>Acciones</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                {selectedPolicy.movements && selectedPolicy.movements.length > 0 ? (
-                                    selectedPolicy.movements.map((mov) => (
-                                        <tr key={mov.id} style={{ borderBottom: '1px solid var(--border)' }}>
-                                            <td style={{ padding: '1rem' }}>{formatDateToDDMMYYYY(mov.date)}</td>
-                                            <td style={{ padding: '1rem' }}>
-                                                <span style={{
-                                                    padding: '0.25rem 0.75rem',
-                                                    borderRadius: '999px',
-                                                    backgroundColor: '#fdf8f6',
-                                                    color: 'var(--primary)',
-                                                    fontSize: '0.85rem',
-                                                    fontWeight: '600'
-                                                }}>
-                                                    {mov.type}
-                                                </span>
-                                            </td>
-                                            <td style={{ padding: '1rem' }}>{mov.description}</td>
-                                            <td style={{ padding: '1rem', textAlign: 'right' }}>
-                                                {mov.evidence && (
-                                                    <a href="#" className="btn" style={{ padding: '0.25rem 0.5rem', fontSize: '0.85rem', color: 'var(--primary)' }} onClick={(e) => e.preventDefault()}>
-                                                        <Paperclip size={14} style={{ marginRight: '4px' }} /> {mov.evidence}
-                                                    </a>
-                                                )}
+                                {(() => {
+                                    const movs = (selectedPolicy.movements || []).filter(m => {
+                                        if (movFilterType !== 'Todos' && m.type !== movFilterType) return false;
+                                        if (movFilterFrom && m.date < movFilterFrom) return false;
+                                        if (movFilterTo && m.date > movFilterTo) return false;
+                                        return true;
+                                    }).slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+                                    if (movs.length === 0) return (
+                                        <tr>
+                                            <td colSpan="4" style={{ padding: '2.5rem', textAlign: 'center', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                                                {selectedPolicy.movements?.length > 0 ? 'No hay movimientos que coincidan con el filtro aplicado.' : 'No hay movimientos registrados en esta póliza.'}
                                             </td>
                                         </tr>
-                                    ))
-                                ) : (
-                                    <tr>
-                                        <td colSpan="4" style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-muted)' }}>
-                                            No hay movimientos registrados en esta póliza.
-                                        </td>
-                                    </tr>
-                                )}
+                                    );
+
+                                    return movs.map((mov) => {
+                                        const isRenewal = mov.type === 'Renovación';
+                                        const badgeStyle = {
+                                            padding: '0.22rem 0.7rem',
+                                            borderRadius: '999px',
+                                            fontSize: '0.78rem',
+                                            fontWeight: '700',
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: '0.3rem',
+                                            ...(isRenewal
+                                                ? { backgroundColor: '#dcfce7', color: '#166534' }
+                                                : mov.type === 'Cancelación'
+                                                ? { backgroundColor: '#fee2e2', color: '#991b1b' }
+                                                : mov.type === 'Endoso'
+                                                ? { backgroundColor: '#eff6ff', color: '#1d4ed8' }
+                                                : { backgroundColor: '#fdf8f6', color: 'var(--primary)' })
+                                        };
+
+                                        const filesList = mov.files && mov.files.length > 0
+                                            ? mov.files
+                                            : (mov.dataUri ? [{ name: mov.evidence, dataUri: mov.dataUri, type: mov.evidence?.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg' }] : []);
+
+                                        return (
+                                            <tr key={mov.id} style={{ borderBottom: '1px solid var(--border)', backgroundColor: isRenewal ? '#f0fdf4' : 'white' }}>
+                                                <td style={{ padding: '1rem', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' }}>
+                                                    {formatDateToDDMMYYYY(mov.date)}
+                                                </td>
+                                                <td style={{ padding: '1rem', verticalAlign: 'top' }}>
+                                                    <span style={badgeStyle}>
+                                                        {isRenewal && <RefreshCw size={12} />}
+                                                        {mov.type}
+                                                    </span>
+                                                    {isRenewal && mov.renewalNewEnd && (
+                                                        <div style={{ fontSize: '0.76rem', color: '#166534', marginTop: '0.3rem', fontWeight: '600' }}>
+                                                            Nueva vigencia: {formatDateToDDMMYYYY(mov.renewalNewEnd)}
+                                                        </div>
+                                                    )}
+                                                    {isRenewal && mov.renewalNewAmount && (
+                                                        <div style={{ fontSize: '0.76rem', color: '#166534', fontWeight: '700' }}>
+                                                            Prima: {mov.renewalNewCurrency} {parseFloat(mov.renewalNewAmount).toLocaleString('es-DO', { minimumFractionDigits: 2 })}
+                                                        </div>
+                                                    )}
+                                                </td>
+                                                <td style={{ padding: '1rem', verticalAlign: 'top', maxWidth: '320px' }}>
+                                                    <div style={{ fontSize: '0.9rem', color: 'var(--text-main)' }}>{mov.description}</div>
+                                                    {isRenewal && mov.renewalNewPolicyNumber && (
+                                                        <div style={{ fontSize: '0.77rem', color: '#166534', marginTop: '0.2rem' }}>
+                                                            Nuevo # Póliza: <strong>{mov.renewalNewPolicyNumber}</strong>
+                                                        </div>
+                                                    )}
+                                                    {isRenewal && mov.renewalNote && (
+                                                        <div style={{ fontSize: '0.77rem', color: 'var(--text-muted)', marginTop: '0.15rem', fontStyle: 'italic' }}>
+                                                            {mov.renewalNote}
+                                                        </div>
+                                                    )}
+                                                </td>
+                                                <td style={{ padding: '1rem', verticalAlign: 'top' }}>
+                                                    {filesList.length > 0 ? (
+                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                                                            {filesList.map((f, idx) => (
+                                                                <button
+                                                                    key={idx}
+                                                                    type="button"
+                                                                    className="btn"
+                                                                    onClick={() => setViewingMovementDoc({
+                                                                        name: f.name || mov.evidence,
+                                                                        category: `Movimiento: ${mov.type}`,
+                                                                        date: mov.date,
+                                                                        notes: mov.description,
+                                                                        dataUri: f.dataUri,
+                                                                        fileUrl: f.dataUri || '#',
+                                                                        type: f.type || (f.name?.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg'),
+                                                                        movementType: mov.type
+                                                                    })}
+                                                                    style={{
+                                                                        padding: '0.25rem 0.6rem',
+                                                                        fontSize: '0.78rem',
+                                                                        color: '#1d4ed8',
+                                                                        backgroundColor: '#eff6ff',
+                                                                        border: '1px solid #bfdbfe',
+                                                                        borderRadius: 'var(--radius-sm)',
+                                                                        fontWeight: '600',
+                                                                        display: 'inline-flex',
+                                                                        alignItems: 'center',
+                                                                        gap: '0.3rem',
+                                                                        cursor: 'pointer',
+                                                                        textAlign: 'left',
+                                                                        maxWidth: '220px',
+                                                                        overflow: 'hidden',
+                                                                        textOverflow: 'ellipsis',
+                                                                        whiteSpace: 'nowrap'
+                                                                    }}
+                                                                    title={f.name || mov.evidence}
+                                                                >
+                                                                    <Paperclip size={12} color="#2563eb" />
+                                                                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.name || mov.evidence}</span>
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    ) : (
+                                                        <span style={{ color: 'var(--text-muted)', fontSize: '0.82rem', fontStyle: 'italic' }}>Sin adjunto</span>
+                                                    )}
+                                                </td>
+                                                {/* Edit / Delete actions */}
+                                                <td style={{ padding: '0.75rem', textAlign: 'center', verticalAlign: 'top' }}>
+                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', alignItems: 'center' }}>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => handleOpenEditMovement(mov)}
+                                                            title="Editar movimiento"
+                                                            style={{ background: 'none', border: '1px solid #cbd5e1', borderRadius: 'var(--radius-sm)', padding: '0.3rem 0.5rem', cursor: 'pointer', color: '#475569', display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.75rem', fontWeight: '700' }}
+                                                        >
+                                                            <Edit size={13} /> Editar
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => handleDeleteMovement(mov.id)}
+                                                            title="Eliminar movimiento"
+                                                            style={{ background: 'none', border: '1px solid #fca5a5', borderRadius: 'var(--radius-sm)', padding: '0.3rem 0.5rem', cursor: 'pointer', color: '#dc2626', display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.75rem', fontWeight: '700' }}
+                                                        >
+                                                            <X size={13} /> Eliminar
+                                                        </button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    });
+                                })()}
                             </tbody>
                         </table>
                     </div>
@@ -501,87 +1739,344 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
                     )}
                 </div>
 
+                {/* Siniestros y Reclamaciones Relacionados */}
+                <div style={{ marginTop: '2rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                        <h3 style={{ fontSize: '1.5rem', color: 'var(--primary)', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <Shield size={22} color="#dc2626" /> Siniestros y Reclamaciones Registradas ({policyClaims.length})
+                        </h3>
+                        {onNavigateToClaim && (
+                            <button
+                                className="btn"
+                                onClick={() => onNavigateToClaim()}
+                                style={{
+                                    border: '1px solid var(--border)',
+                                    backgroundColor: 'white',
+                                    padding: '0.4rem 0.8rem',
+                                    fontSize: '0.85rem',
+                                    fontWeight: '600',
+                                    color: 'var(--primary)'
+                                }}
+                            >
+                                Ver todos en Siniestros
+                            </button>
+                        )}
+                    </div>
+
+                    {policyClaims.length > 0 ? (
+                        <div className="card" style={{ padding: '0', overflow: 'hidden' }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                <thead>
+                                    <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid var(--border)' }}>
+                                        <th style={{ padding: '1rem', textAlign: 'left', fontWeight: '600', color: 'var(--text-muted)' }}>ID Siniestro</th>
+                                        <th style={{ padding: '1rem', textAlign: 'left', fontWeight: '600', color: 'var(--text-muted)' }}>Tipo de Incidente</th>
+                                        <th style={{ padding: '1rem', textAlign: 'left', fontWeight: '600', color: 'var(--text-muted)' }}>Fecha</th>
+                                        <th style={{ padding: '1rem', textAlign: 'left', fontWeight: '600', color: 'var(--text-muted)' }}>Estado</th>
+                                        <th style={{ padding: '1rem', textAlign: 'right', fontWeight: '600', color: 'var(--text-muted)' }}>Monto Reclamado</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {policyClaims.map((c) => {
+                                        const isOpen = isOpenClaim(c);
+                                        return (
+                                            <tr key={c.id} style={{ borderBottom: '1px solid var(--border)', backgroundColor: isOpen ? '#fffafa' : 'white' }}>
+                                                <td style={{ padding: '1rem', fontWeight: 'bold' }}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                                        {isOpen && <ShieldAlert size={16} color="#dc2626" />}
+                                                        <span>{c.id}</span>
+                                                    </div>
+                                                </td>
+                                                <td style={{ padding: '1rem' }}>
+                                                    <div style={{ fontWeight: '600' }}>{c.type}</div>
+                                                    {c.description && <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{c.description}</div>}
+                                                </td>
+                                                <td style={{ padding: '1rem' }}>{formatDateToDDMMYYYY(c.date || c.reportDate)}</td>
+                                                <td style={{ padding: '1rem' }}>
+                                                    <span style={{
+                                                        display: 'inline-flex',
+                                                        alignItems: 'center',
+                                                        gap: '0.25rem',
+                                                        padding: '0.25rem 0.75rem',
+                                                        borderRadius: '999px',
+                                                        fontSize: '0.85rem',
+                                                        fontWeight: '600',
+                                                        backgroundColor: isOpen ? '#fee2e2' : '#dcfce7',
+                                                        color: isOpen ? '#991b1b' : '#166534'
+                                                    }}>
+                                                        {c.status || (isOpen ? 'Abierto' : 'Cerrado')}
+                                                    </span>
+                                                </td>
+                                                <td style={{ padding: '1rem', textAlign: 'right', fontWeight: '700' }}>{c.amount || 'N/A'}</td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    ) : (
+                        <div className="card" style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                            No hay siniestros registrados para esta póliza.
+                        </div>
+                    )}
+                </div>
+
                 {/* New Movement Modal */}
                 {showMovementModal && (
                     <div style={{
                         position: 'fixed',
-                        top: 0, left: 0, right: 0, bottom: 0,
-                        backgroundColor: 'rgba(0,0,0,0.5)',
+                        inset: 0,
+                        backgroundColor: 'rgba(0,0,0,0.55)',
+                        backdropFilter: 'blur(2px)',
                         display: 'flex',
-                        alignItems: 'center',
+                        alignItems: 'flex-start',
                         justifyContent: 'center',
-                        zIndex: 1000
+                        zIndex: 1000,
+                        padding: '1.5rem 1rem',
+                        overflowY: 'auto'
                     }}>
-                        <div className="card" style={{ width: '100%', maxWidth: '500px', backgroundColor: 'white', maxHeight: '90vh', overflowY: 'auto' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-                                <h3 style={{ margin: 0 }}>Registrar Movimiento</h3>
-                                <button onClick={() => setShowMovementModal(false)} style={{ background: 'none', border: 'none', padding: '0.5rem', cursor: 'pointer' }}>
+                        <div className="card" style={{ width: '100%', maxWidth: '620px', backgroundColor: 'white', margin: 'auto', padding: '2rem' }}>
+                            {/* Modal Header */}
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', borderBottom: '1px solid var(--border)', paddingBottom: '1rem' }}>
+                                <div>
+                                    <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                        {newMovement.type === 'Renovación' ? <RefreshCw size={20} color="#16a34a" /> : <Plus size={20} />}
+                                        {editingMovementId ? 'Editar Movimiento' : 'Registrar Movimiento'}
+                                    </h3>
+                                    <p style={{ margin: '0.2rem 0 0', fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+                                        Póliza: <strong>{selectedPolicy?.id}</strong> · {selectedPolicy?.client}
+                                    </p>
+                                </div>
+                                <button onClick={() => { setShowMovementModal(false); setEditingMovementId(null); }} style={{ background: 'none', border: 'none', padding: '0.5rem', cursor: 'pointer' }}>
                                     <XCircle size={24} />
                                 </button>
                             </div>
 
                             <form onSubmit={handleAddMovement}>
-                                <div style={{ marginBottom: '1rem' }}>
-                                    <label>Tipo de Movimiento</label>
-                                    <select
-                                        style={{ width: '100%', padding: '0.5rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}
-                                        value={newMovement.type}
-                                        onChange={e => setNewMovement({ ...newMovement, type: e.target.value })}
-                                    >
-                                        <option value="Endoso">Endoso</option>
-                                        <option value="Renovación">Renovación</option>
-                                        <option value="Cancelación">Cancelación</option>
-                                        <option value="Reclamación">Reclamación / Siniestro</option>
-                                        <option value="Pago">Pago de Prima</option>
-                                        <option value="Inclusión">Inclusión</option>
-                                        <option value="Exclusión">Exclusión</option>
-                                        <option value="Otro">Otro</option>
-                                    </select>
-                                </div>
-                                <div style={{ marginBottom: '1rem' }}>
-                                    <label>Fecha</label>
-                                    <input
-                                        type="date"
-                                        required
-                                        value={newMovement.date}
-                                        onChange={e => setNewMovement({ ...newMovement, date: e.target.value })}
-                                    />
-                                </div>
-                                <div style={{ marginBottom: '1rem' }}>
-                                    <label>Descripción</label>
-                                    <textarea
-                                        required
-                                        rows="3"
-                                        placeholder="Detalles del movimiento..."
-                                        value={newMovement.description}
-                                        onChange={e => setNewMovement({ ...newMovement, description: e.target.value })}
-                                    />
-                                </div>
-                                <div style={{ marginBottom: '1.5rem' }}>
-                                    <label>Adjuntar Prueba (PDF/Imagen)</label>
-                                    <div style={{ display: 'flex', gap: '0.5rem' }}>
-                                        <label className="btn" style={{ border: '1px solid var(--border)', backgroundColor: '#f8fafc', flex: 1, cursor: 'pointer', justifyContent: 'center' }}>
-                                            <Upload size={18} /> {newMovement.file ? newMovement.file.name : 'Seleccionar archivo'}
-                                            <input
-                                                type="file"
-                                                style={{ display: 'none' }}
-                                                onChange={e => setNewMovement({ ...newMovement, file: e.target.files[0] })}
-                                            />
-                                        </label>
+                                {/* Type + Date row */}
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                                    <div>
+                                        <label style={{ fontWeight: '700', fontSize: '0.85rem' }}>Tipo de Movimiento</label>
+                                        <select
+                                            style={{ width: '100%', padding: '0.55rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', marginTop: '0.35rem' }}
+                                            value={newMovement.type}
+                                            onChange={e => {
+                                                const newType = e.target.value;
+                                                const updates = { ...newMovement, type: newType };
+                                                if (newType === 'Renovación') {
+                                                    // Use policy expiration date as the movement date
+                                                    const policyEndDate = selectedPolicy?.endDate || selectedPolicy?.renewal || '';
+                                                    if (policyEndDate) {
+                                                        updates.date = policyEndDate;
+                                                        // Pre-fill new start as the same expiration date
+                                                        updates.renewalNewStart = policyEndDate;
+                                                        // Calculate suggested new end based on renewal frequency
+                                                        if (policyEndDate) {
+                                                            const d = new Date(policyEndDate);
+                                                            const freq = selectedPolicy?.renewalFrequency || 'Anual';
+                                                            if (freq === 'Semestral') d.setMonth(d.getMonth() + 6);
+                                                            else if (freq === 'Trimestral') d.setMonth(d.getMonth() + 3);
+                                                            else if (freq === 'Mensual') d.setMonth(d.getMonth() + 1);
+                                                            else d.setFullYear(d.getFullYear() + 1); // Anual por defecto
+                                                            updates.renewalNewEnd = d.toISOString().split('T')[0];
+                                                        }
+                                                    }
+                                                }
+                                                setNewMovement(updates);
+                                            }}
+                                        >
+                                            <option value="Endoso">Endoso</option>
+                                            <option value="Renovación">🔄 Renovación</option>
+                                            <option value="Cancelación">Cancelación</option>
+                                            <option value="Reclamación">Reclamación / Siniestro</option>
+                                            <option value="Pago">Pago de Prima</option>
+                                            <option value="Inclusión">Inclusión</option>
+                                            <option value="Exclusión">Exclusión</option>
+                                            <option value="Otro">Otro</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label style={{ fontWeight: '700', fontSize: '0.85rem' }}>Fecha del Movimiento</label>
+                                        <input
+                                            type="date"
+                                            required
+                                            value={newMovement.date}
+                                            onChange={e => setNewMovement({ ...newMovement, date: e.target.value })}
+                                            style={{ width: '100%', padding: '0.55rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', marginTop: '0.35rem', boxSizing: 'border-box' }}
+                                        />
                                     </div>
                                 </div>
 
-                                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem' }}>
-                                    <button type="button" className="btn" onClick={() => setShowMovementModal(false)} style={{ backgroundColor: '#f1f5f9' }}>
+                                {/* Renewal-specific fields */}
+                                {newMovement.type === 'Renovación' && (
+                                    <div style={{ backgroundColor: '#f0fdf4', border: '1px solid #86efac', borderRadius: 'var(--radius-md)', padding: '1.25rem', marginBottom: '1rem' }}>
+                                        <h4 style={{ margin: '0 0 1rem 0', color: '#166534', display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.95rem' }}>
+                                            <RefreshCw size={16} /> Datos de la Renovación
+                                        </h4>
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.85rem' }}>
+                                            <div>
+                                                <label style={{ fontSize: '0.82rem', fontWeight: '700', color: '#166534' }}>Nueva Vigencia Desde</label>
+                                                <input
+                                                    type="date"
+                                                    value={newMovement.renewalNewStart}
+                                                    onChange={e => setNewMovement({ ...newMovement, renewalNewStart: e.target.value })}
+                                                    style={{ width: '100%', padding: '0.45rem 0.65rem', borderRadius: 'var(--radius-sm)', border: '1px solid #86efac', marginTop: '0.25rem', boxSizing: 'border-box' }}
+                                                />
+                                            </div>
+                                            <div>
+                                                <label style={{ fontSize: '0.82rem', fontWeight: '700', color: '#166534' }}>Nueva Vigencia Hasta</label>
+                                                <input
+                                                    type="date"
+                                                    value={newMovement.renewalNewEnd}
+                                                    onChange={e => setNewMovement({ ...newMovement, renewalNewEnd: e.target.value })}
+                                                    style={{ width: '100%', padding: '0.45rem 0.65rem', borderRadius: 'var(--radius-sm)', border: '1px solid #86efac', marginTop: '0.25rem', boxSizing: 'border-box' }}
+                                                />
+                                            </div>
+                                            <div>
+                                                <label style={{ fontSize: '0.82rem', fontWeight: '700', color: '#166534' }}>Nueva Prima</label>
+                                                <div style={{ display: 'flex', gap: '0.4rem', marginTop: '0.25rem' }}>
+                                                    <select
+                                                        value={newMovement.renewalNewCurrency}
+                                                        onChange={e => setNewMovement({ ...newMovement, renewalNewCurrency: e.target.value })}
+                                                        style={{ padding: '0.45rem 0.5rem', borderRadius: 'var(--radius-sm)', border: '1px solid #86efac', fontSize: '0.85rem', fontWeight: '700' }}
+                                                    >
+                                                        <option>DOP</option>
+                                                        <option>USD</option>
+                                                    </select>
+                                                    <input
+                                                        type="number"
+                                                        min="0"
+                                                        step="any"
+                                                        placeholder="0.00"
+                                                        value={newMovement.renewalNewAmount}
+                                                        onChange={e => setNewMovement({ ...newMovement, renewalNewAmount: e.target.value })}
+                                                        style={{ flex: 1, padding: '0.45rem 0.65rem', borderRadius: 'var(--radius-sm)', border: '1px solid #86efac', fontSize: '0.9rem' }}
+                                                    />
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label style={{ fontSize: '0.82rem', fontWeight: '700', color: '#166534' }}>Nuevo # Póliza (si cambia)</label>
+                                                <input
+                                                    type="text"
+                                                    placeholder="Ej. POL-2025-001234"
+                                                    value={newMovement.renewalNewPolicyNumber}
+                                                    onChange={e => setNewMovement({ ...newMovement, renewalNewPolicyNumber: e.target.value })}
+                                                    style={{ width: '100%', padding: '0.45rem 0.65rem', borderRadius: 'var(--radius-sm)', border: '1px solid #86efac', marginTop: '0.25rem', boxSizing: 'border-box' }}
+                                                />
+                                            </div>
+                                        </div>
+                                        <div style={{ marginTop: '0.85rem' }}>
+                                            <label style={{ fontSize: '0.82rem', fontWeight: '700', color: '#166534' }}>Notas de la Renovación</label>
+                                            <input
+                                                type="text"
+                                                placeholder="Ej. Renovación procesada con cambio de suma asegurada..."
+                                                value={newMovement.renewalNote}
+                                                onChange={e => setNewMovement({ ...newMovement, renewalNote: e.target.value })}
+                                                style={{ width: '100%', padding: '0.45rem 0.65rem', borderRadius: 'var(--radius-sm)', border: '1px solid #86efac', marginTop: '0.25rem', boxSizing: 'border-box' }}
+                                            />
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Description */}
+                                <div style={{ marginBottom: '1rem' }}>
+                                    <label style={{ fontWeight: '700', fontSize: '0.85rem' }}>Descripción / Detalle</label>
+                                    <textarea
+                                        required
+                                        rows="3"
+                                        placeholder="Describa el detalle del movimiento..."
+                                        value={newMovement.description}
+                                        onChange={e => setNewMovement({ ...newMovement, description: e.target.value })}
+                                        style={{ width: '100%', marginTop: '0.35rem', padding: '0.55rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', resize: 'vertical', boxSizing: 'border-box' }}
+                                    />
+                                </div>
+
+                                {/* Multi-file upload */}
+                                {/* If editing, show currently attached files */}
+                                {editingMovementId && newMovement._existingFiles?.length > 0 && (
+                                    <div style={{ marginBottom: '0.75rem', padding: '0.75rem', backgroundColor: '#f0fdf4', borderRadius: 'var(--radius-sm)', border: '1px solid #86efac' }}>
+                                        <div style={{ fontSize: '0.8rem', fontWeight: '700', color: '#166534', marginBottom: '0.4rem' }}>
+                                            Archivos actuales (se conservarán salvo que cargues nuevos):
+                                        </div>
+                                        {newMovement._existingFiles.map((f, idx) => (
+                                            <div key={idx} style={{ fontSize: '0.8rem', color: '#166534', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                                                <Paperclip size={12} /> {f.name}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                <div style={{ marginBottom: '1.5rem' }}>
+                                    <label style={{ fontWeight: '700', fontSize: '0.85rem', display: 'block', marginBottom: '0.35rem' }}>
+                                        {editingMovementId ? 'Agregar / Reemplazar Documentos' : 'Documentos Adjuntos'} {newMovement.type === 'Renovación' ? '(Carta de renovación, factura, cotización...)' : '(PDF, imágenes)'}
+                                    </label>
+                                    <label style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        gap: '0.5rem',
+                                        padding: '0.85rem',
+                                        border: '2px dashed var(--border)',
+                                        borderRadius: 'var(--radius-md)',
+                                        backgroundColor: '#f8fafc',
+                                        cursor: 'pointer',
+                                        fontWeight: '600',
+                                        fontSize: '0.9rem',
+                                        color: 'var(--primary)',
+                                        transition: 'background 0.15s'
+                                    }}>
+                                        <Upload size={18} />
+                                        {newMovement.files?.length > 0 ? `${newMovement.files.length} archivo(s) seleccionado(s)` : 'Seleccionar archivos (múltiples permitidos)'}
+                                        <input
+                                            type="file"
+                                            multiple
+                                            accept=".pdf,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tiff,.doc,.docx,.xls,.xlsx"
+                                            style={{ display: 'none' }}
+                                            onChange={e => setNewMovement({ ...newMovement, files: Array.from(e.target.files) })}
+                                        />
+                                    </label>
+                                    {newMovement.files?.length > 0 && (
+                                        <div style={{ marginTop: '0.6rem', display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+                                            {newMovement.files.map((f, idx) => (
+                                                <div key={idx} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#eff6ff', borderRadius: 'var(--radius-sm)', padding: '0.3rem 0.65rem', fontSize: '0.82rem' }}>
+                                                    <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', color: '#1d4ed8', fontWeight: '600' }}>
+                                                        <Paperclip size={13} /> {f.name}
+                                                    </span>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setNewMovement({ ...newMovement, files: newMovement.files.filter((_, i) => i !== idx) })}
+                                                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#dc2626', padding: '0 0.2rem', fontSize: '0.9rem', lineHeight: 1 }}
+                                                        title="Quitar archivo"
+                                                    >✕</button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', borderTop: '1px solid var(--border)', paddingTop: '1rem' }}>
+                                    <button type="button" className="btn" onClick={() => { setShowMovementModal(false); setEditingMovementId(null); }} style={{ backgroundColor: '#f1f5f9', fontWeight: '700' }}>
                                         Cancelar
                                     </button>
-                                    <button type="submit" className="btn btn-primary">
-                                        Guardar Movimiento
+                                    <button type="submit" className="btn btn-primary" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: '700' }}>
+                                        {newMovement.type === 'Renovación' ? <RefreshCw size={16} /> : editingMovementId ? <Save size={16} /> : <Plus size={16} />}
+                                        {editingMovementId ? 'Guardar Cambios' : newMovement.type === 'Renovación' ? 'Registrar Renovación' : 'Guardar Movimiento'}
                                     </button>
                                 </div>
                             </form>
                         </div>
                     </div>
+                )}
+
+                {/* Modal de Edición Completa de Póliza */}
+                {renderEditPolicyModalContent()}
+
+                {/* Visor de Evidencia de Movimiento */}
+                {viewingMovementDoc && (
+                    <DocumentViewerModal
+                        isOpen={!!viewingMovementDoc}
+                        onClose={() => setViewingMovementDoc(null)}
+                        document={viewingMovementDoc}
+                    />
                 )}
             </div>
         );
@@ -589,27 +2084,385 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
 
     return (
         <div>
-            <div style={{ marginBottom: '2rem' }}>
+            <div style={{ marginBottom: '1.5rem' }}>
                 <h2 style={{ fontSize: '2rem', color: 'var(--primary)' }}>Cartera de Pólizas</h2>
-                <p style={{ color: 'var(--text-muted)' }}>Visualiza y gestiona las pólizas de todos los clientes.</p>
+                <p style={{ color: 'var(--text-muted)' }}>Visualiza, renueva y gestiona las pólizas de todos los clientes y carteras de agentes.</p>
+            </div>
+
+            {/* Pestañas de Estado de Pólizas */}
+            <div style={{
+                display: 'flex',
+                gap: '0.6rem',
+                marginBottom: '1.25rem',
+                overflowX: 'auto',
+                paddingBottom: '0.4rem'
+            }}>
+                <button
+                    onClick={() => setStatusTab('ALL')}
+                    style={{
+                        padding: '0.55rem 1.1rem',
+                        borderRadius: '999px',
+                        border: '1px solid var(--border)',
+                        cursor: 'pointer',
+                        fontWeight: '700',
+                        fontSize: '0.88rem',
+                        backgroundColor: statusTab === 'ALL' ? 'var(--primary)' : 'white',
+                        color: statusTab === 'ALL' ? 'white' : 'var(--text-main)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.4rem',
+                        transition: 'all 0.15s'
+                    }}
+                >
+                    Todas ({policies.length})
+                </button>
+                <button
+                    onClick={() => setStatusTab('ACTIVE')}
+                    style={{
+                        padding: '0.55rem 1.1rem',
+                        borderRadius: '999px',
+                        border: statusTab === 'ACTIVE' ? '1px solid #166534' : '1px solid #bbf7d0',
+                        cursor: 'pointer',
+                        fontWeight: '700',
+                        fontSize: '0.88rem',
+                        backgroundColor: statusTab === 'ACTIVE' ? '#166534' : '#f0fdf4',
+                        color: statusTab === 'ACTIVE' ? 'white' : '#166534',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.4rem',
+                        transition: 'all 0.15s'
+                    }}
+                >
+                    <CheckCircle size={15} /> Vigentes ({activeCount})
+                </button>
+                <button
+                    onClick={() => setStatusTab('EXPIRING')}
+                    style={{
+                        padding: '0.55rem 1.1rem',
+                        borderRadius: '999px',
+                        border: statusTab === 'EXPIRING' ? '1px solid #9a3412' : '1px solid #fed7aa',
+                        cursor: 'pointer',
+                        fontWeight: '700',
+                        fontSize: '0.88rem',
+                        backgroundColor: statusTab === 'EXPIRING' ? '#9a3412' : '#fff7ed',
+                        color: statusTab === 'EXPIRING' ? 'white' : '#9a3412',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.4rem',
+                        transition: 'all 0.15s'
+                    }}
+                >
+                    <AlertTriangle size={15} /> Por Vencer ({expiringCount})
+                </button>
+                <button
+                    onClick={() => setStatusTab('PENDING')}
+                    style={{
+                        padding: '0.55rem 1.1rem',
+                        borderRadius: '999px',
+                        border: statusTab === 'PENDING' ? '1px solid #854d0e' : '1px solid #fef08a',
+                        cursor: 'pointer',
+                        fontWeight: '700',
+                        fontSize: '0.88rem',
+                        backgroundColor: statusTab === 'PENDING' ? '#854d0e' : '#fefce8',
+                        color: statusTab === 'PENDING' ? 'white' : '#854d0e',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.4rem',
+                        transition: 'all 0.15s'
+                    }}
+                >
+                    <AlertTriangle size={15} /> Con Pago Pendiente ({pendingCount})
+                </button>
+                <button
+                    onClick={() => setStatusTab('CANCELLED')}
+                    style={{
+                        padding: '0.55rem 1.1rem',
+                        borderRadius: '999px',
+                        border: statusTab === 'CANCELLED' ? '1px solid #991b1b' : '1px solid #fecaca',
+                        cursor: 'pointer',
+                        fontWeight: '700',
+                        fontSize: '0.88rem',
+                        backgroundColor: statusTab === 'CANCELLED' ? '#991b1b' : '#fef2f2',
+                        color: statusTab === 'CANCELLED' ? 'white' : '#991b1b',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.4rem',
+                        transition: 'all 0.15s'
+                    }}
+                >
+                    <XCircle size={15} /> Canceladas ({cancelledCount})
+                </button>
             </div>
 
             <div className="card" style={{ padding: '0', overflow: 'hidden' }}>
-                <div style={{ padding: '1.5rem', borderBottom: '1px solid var(--border)', display: 'flex', gap: '1rem', alignItems: 'center' }}>
-                    <div style={{ position: 'relative', flex: 1, maxWidth: '400px' }}>
-                        <Search style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} size={20} />
-                        <input
-                            type="text"
-                            placeholder="Buscar póliza, cliente o aseguradora..."
-                            value={searchTerm}
-                            onChange={(e) => setSearchTerm(e.target.value)}
-                            style={{ paddingLeft: '40px' }}
-                        />
+                <div style={{ padding: '1.25rem 1.5rem', borderBottom: '1px solid var(--border)', display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'space-between' }}>
+                    <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', flex: 1, minWidth: '300px' }}>
+                        <div style={{ position: 'relative', flex: 1, maxWidth: '380px' }}>
+                            <Search style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} size={20} />
+                            <input
+                                type="text"
+                                placeholder="Buscar por póliza, cliente, código o aseguradora..."
+                                value={searchTerm}
+                                onChange={(e) => setSearchTerm(e.target.value)}
+                                style={{ paddingLeft: '40px', paddingRight: searchTerm ? '36px' : '12px', width: '100%' }}
+                            />
+                            {searchTerm && (
+                                <button
+                                    onClick={() => setSearchTerm('')}
+                                    style={{
+                                        position: 'absolute',
+                                        right: '10px',
+                                        top: '50%',
+                                        transform: 'translateY(-50%)',
+                                        background: 'none',
+                                        border: 'none',
+                                        cursor: 'pointer',
+                                        color: 'var(--text-muted)',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        padding: '2px'
+                                    }}
+                                    title="Limpiar búsqueda"
+                                >
+                                    <XCircle size={16} />
+                                </button>
+                            )}
+                        </div>
+
+                        {/* Selector Estético por Código de Corredor & Aseguradora */}
+                        <div ref={codeDropdownRef} style={{ position: 'relative' }}>
+                            <button
+                                type="button"
+                                onClick={() => setIsCodeDropdownOpen(prev => !prev)}
+                                style={{
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '0.6rem',
+                                    padding: '0.5rem 0.95rem',
+                                    borderRadius: 'var(--radius-md)',
+                                    border: selectedCodeId !== 'ALL' ? '1.5px solid #2563eb' : '1.5px solid var(--border)',
+                                    fontSize: '0.88rem',
+                                    fontWeight: '600',
+                                    backgroundColor: selectedCodeId !== 'ALL' ? '#eff6ff' : '#ffffff',
+                                    color: selectedCodeId !== 'ALL' ? '#1d4ed8' : 'var(--text-main)',
+                                    cursor: 'pointer',
+                                    boxShadow: selectedCodeId !== 'ALL' ? '0 2px 6px rgba(37, 99, 235, 0.15)' : '0 1px 3px rgba(0,0,0,0.04)',
+                                    transition: 'all 0.2s',
+                                    minHeight: '42px'
+                                }}
+                            >
+                                {selectedCodeItem ? (
+                                    <>
+                                        <InsurerLogo name={selectedCodeItem.insurer} size={22} />
+                                        <span style={{ fontWeight: '700' }}>{selectedCodeItem.insurer}</span>
+                                        <span style={{
+                                            backgroundColor: '#dbeafe',
+                                            color: '#1e40af',
+                                            padding: '0.1rem 0.45rem',
+                                            borderRadius: '4px',
+                                            fontSize: '0.76rem',
+                                            fontWeight: '800'
+                                        }}>
+                                            Cód. {selectedCodeItem.code}
+                                        </span>
+                                        <span style={{ fontSize: '0.8rem', color: '#60a5fa', fontWeight: '700' }}>
+                                            ({policies.filter(p => policyMatchesAgentCode(p, selectedCodeItem)).length})
+                                        </span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <Briefcase size={18} color="var(--primary)" />
+                                        <span>Todas las Carteras y Códigos ({policies.length})</span>
+                                    </>
+                                )}
+                                <ChevronDown size={16} style={{ transform: isCodeDropdownOpen ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s', marginLeft: '0.2rem' }} />
+                            </button>
+
+                            {/* Menú Desplegable con Códigos, Nombres y Logos */}
+                            {isCodeDropdownOpen && (
+                                <div style={{
+                                    position: 'absolute',
+                                    top: 'calc(100% + 6px)',
+                                    left: 0,
+                                    zIndex: 1000,
+                                    width: '390px',
+                                    backgroundColor: '#ffffff',
+                                    borderRadius: 'var(--radius-lg)',
+                                    border: '1px solid var(--border)',
+                                    boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.15), 0 8px 10px -6px rgba(0, 0, 0, 0.1)',
+                                    overflow: 'hidden'
+                                }}>
+                                    <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--border)', backgroundColor: '#f8fafc' }}>
+                                        <span style={{ fontSize: '0.78rem', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                                            Seleccionar Cartera / Código de Agencia
+                                        </span>
+                                    </div>
+
+                                    <div style={{ maxHeight: '340px', overflowY: 'auto', padding: '0.4rem' }}>
+                                        {/* Opción: Todas las Carteras */}
+                                        <div
+                                            onClick={() => {
+                                                setSelectedCodeId('ALL');
+                                                setIsCodeDropdownOpen(false);
+                                            }}
+                                            style={{
+                                                padding: '0.75rem 0.9rem',
+                                                borderRadius: 'var(--radius-md)',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'space-between',
+                                                cursor: 'pointer',
+                                                backgroundColor: selectedCodeId === 'ALL' ? '#eff6ff' : 'transparent',
+                                                border: selectedCodeId === 'ALL' ? '1px solid #bfdbfe' : '1px solid transparent',
+                                                marginBottom: '0.35rem',
+                                                transition: 'all 0.15s'
+                                            }}
+                                            onMouseEnter={e => selectedCodeId !== 'ALL' && (e.currentTarget.style.backgroundColor = '#f1f5f9')}
+                                            onMouseLeave={e => selectedCodeId !== 'ALL' && (e.currentTarget.style.backgroundColor = 'transparent')}
+                                        >
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                                <div style={{
+                                                    width: '32px',
+                                                    height: '32px',
+                                                    borderRadius: '50%',
+                                                    backgroundColor: '#e2e8f0',
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                    color: 'var(--primary)'
+                                                }}>
+                                                    <Briefcase size={17} />
+                                                </div>
+                                                <div>
+                                                    <div style={{ fontSize: '0.92rem', fontWeight: '700', color: 'var(--text-main)' }}>
+                                                        Todas las Carteras y Códigos
+                                                    </div>
+                                                    <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                                                        Visualizar todas las pólizas del sistema
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                                <span style={{ fontSize: '0.8rem', fontWeight: '700', backgroundColor: '#f1f5f9', color: 'var(--text-muted)', padding: '0.15rem 0.5rem', borderRadius: '999px' }}>
+                                                    {policies.length}
+                                                </span>
+                                                {selectedCodeId === 'ALL' && <Check size={16} color="#2563eb" />}
+                                            </div>
+                                        </div>
+
+                                        <div style={{ borderTop: '1px solid var(--border)', margin: '0.4rem 0' }} />
+
+                                        {/* Grupos Organizados por Aseguradora */}
+                                        {groupedCodesByCompany.map((group) => {
+                                            const totalInGroup = group.codes.reduce((sum, c) => sum + c.count, 0);
+
+                                            return (
+                                                <div key={group.insurer} style={{ marginBottom: '0.75rem' }}>
+                                                    {/* Encabezado de la Compañía con Logo */}
+                                                    <div style={{
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        justifyContent: 'space-between',
+                                                        padding: '0.45rem 0.75rem',
+                                                        backgroundColor: '#f8fafc',
+                                                        borderRadius: 'var(--radius-sm)',
+                                                        marginBottom: '0.35rem',
+                                                        border: '1px solid #f1f5f9'
+                                                    }}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem' }}>
+                                                            <InsurerLogo name={group.insurer} size={24} />
+                                                            <span style={{ fontSize: '0.88rem', fontWeight: '800', color: '#1e293b' }}>
+                                                                {group.insurer}
+                                                            </span>
+                                                        </div>
+                                                        <span style={{
+                                                            fontSize: '0.75rem',
+                                                            fontWeight: '700',
+                                                            color: '#64748b',
+                                                            backgroundColor: '#e2e8f0',
+                                                            padding: '0.1rem 0.45rem',
+                                                            borderRadius: '999px'
+                                                        }}>
+                                                            {totalInGroup} pólizas
+                                                        </span>
+                                                    </div>
+
+                                                    {/* Códigos de Corredor dentro de esta Compañía */}
+                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', paddingLeft: '0.5rem' }}>
+                                                        {group.codes.map(({ key, item, count }) => {
+                                                            const isSelected = selectedCodeId === String(item.id || key);
+
+                                                            return (
+                                                                <div
+                                                                    key={key}
+                                                                    onClick={() => {
+                                                                        setSelectedCodeId(String(item.id || key));
+                                                                        setIsCodeDropdownOpen(false);
+                                                                    }}
+                                                                    style={{
+                                                                        padding: '0.55rem 0.75rem',
+                                                                        borderRadius: 'var(--radius-md)',
+                                                                        display: 'flex',
+                                                                        alignItems: 'center',
+                                                                        justifyContent: 'space-between',
+                                                                        cursor: 'pointer',
+                                                                        backgroundColor: isSelected ? '#eff6ff' : 'transparent',
+                                                                        border: isSelected ? '1px solid #bfdbfe' : '1px solid #f1f5f9',
+                                                                        transition: 'all 0.15s'
+                                                                    }}
+                                                                    onMouseEnter={e => !isSelected && (e.currentTarget.style.backgroundColor = '#f8fafc')}
+                                                                    onMouseLeave={e => !isSelected && (e.currentTarget.style.backgroundColor = 'transparent')}
+                                                                >
+                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                                                                        <span style={{
+                                                                            backgroundColor: isSelected ? '#dbeafe' : '#f1f5f9',
+                                                                            color: isSelected ? '#1e40af' : '#0f172a',
+                                                                            padding: '0.15rem 0.5rem',
+                                                                            borderRadius: '4px',
+                                                                            fontSize: '0.78rem',
+                                                                            fontWeight: '800'
+                                                                        }}>
+                                                                            Cód. {item.code}
+                                                                        </span>
+                                                                        <div>
+                                                                            <div style={{ fontSize: '0.86rem', fontWeight: '700', color: 'var(--text-main)' }}>
+                                                                                {item.agent}
+                                                                            </div>
+                                                                            {item.notes && (
+                                                                                <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                                                                                    {item.notes}
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+                                                                    </div>
+
+                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                                                        <span style={{
+                                                                            fontSize: '0.78rem',
+                                                                            fontWeight: '700',
+                                                                            backgroundColor: isSelected ? '#bfdbfe' : '#f1f5f9',
+                                                                            color: isSelected ? '#1e3a8a' : 'var(--text-muted)',
+                                                                            padding: '0.12rem 0.45rem',
+                                                                            borderRadius: '999px'
+                                                                        }}>
+                                                                            {count}
+                                                                        </span>
+                                                                        {isSelected && <Check size={15} color="#2563eb" />}
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
                     </div>
-                    <div style={{ display: 'flex', gap: '1rem' }}>
-                        <button className="btn" style={{ border: '1px solid var(--border)', backgroundColor: 'white' }}>
-                            <Filter size={18} /> Filtros
-                        </button>
+
+                    <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
                         <button className="btn btn-primary" onClick={() => setShowCreatePolicyModal(true)}>
                             <Plus size={18} /> Nueva Póliza
                         </button>
@@ -620,29 +2473,146 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
                     <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                         <thead>
                             <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid var(--border)' }}>
-                                <th style={{ padding: '1rem', textAlign: 'left', color: 'var(--text-muted)' }}>Póliza #</th>
-                                <th style={{ padding: '1rem', textAlign: 'left', color: 'var(--text-muted)' }}>Cliente</th>
-                                <th style={{ padding: '1rem', textAlign: 'left', color: 'var(--text-muted)' }}>Ramo / Aseguradora</th>
-                                <th style={{ padding: '1rem', textAlign: 'left', color: 'var(--text-muted)' }}>Renovación</th>
-                                <th style={{ padding: '1rem', textAlign: 'left', color: 'var(--text-muted)' }}>Estado</th>
-                                <th style={{ padding: '1rem', textAlign: 'right', color: 'var(--text-muted)' }}>Prima</th>
-                                <th style={{ padding: '1rem', textAlign: 'right', color: 'var(--text-muted)' }}></th>
+                                <th
+                                    onClick={() => handleSort('id')}
+                                    style={{ padding: '1rem', textAlign: 'left', color: sortConfig.key === 'id' ? '#2563eb' : 'var(--text-muted)', cursor: 'pointer', userSelect: 'none' }}
+                                    title="Hacer clic para ordenar por Número de Póliza"
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center' }}>
+                                        <span>Póliza #</span>
+                                        {renderSortIcon('id')}
+                                    </div>
+                                </th>
+                                <th
+                                    onClick={() => handleSort('client')}
+                                    style={{ padding: '1rem', textAlign: 'left', color: sortConfig.key === 'client' ? '#2563eb' : 'var(--text-muted)', cursor: 'pointer', userSelect: 'none' }}
+                                    title="Hacer clic para ordenar por Cliente"
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center' }}>
+                                        <span>Cliente</span>
+                                        {renderSortIcon('client')}
+                                    </div>
+                                </th>
+                                <th
+                                    onClick={() => handleSort('insurer')}
+                                    style={{ padding: '1rem', textAlign: 'left', color: sortConfig.key === 'insurer' ? '#2563eb' : 'var(--text-muted)', cursor: 'pointer', userSelect: 'none' }}
+                                    title="Hacer clic para ordenar por Aseguradora / Ramo"
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center' }}>
+                                        <span>Ramo / Aseguradora</span>
+                                        {renderSortIcon('insurer')}
+                                    </div>
+                                </th>
+                                <th
+                                    onClick={() => handleSort('endDate')}
+                                    style={{ padding: '1rem', textAlign: 'left', color: sortConfig.key === 'endDate' ? '#2563eb' : 'var(--text-muted)', cursor: 'pointer', userSelect: 'none' }}
+                                    title="Hacer clic para ordenar por Fecha de Renovación"
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center' }}>
+                                        <span>Próxima Renovación (Fin)</span>
+                                        {renderSortIcon('endDate')}
+                                    </div>
+                                </th>
+                                <th
+                                    onClick={() => handleSort('status')}
+                                    style={{ padding: '1rem', textAlign: 'left', color: sortConfig.key === 'status' ? '#2563eb' : 'var(--text-muted)', cursor: 'pointer', userSelect: 'none' }}
+                                    title="Hacer clic para ordenar por Estado"
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center' }}>
+                                        <span>Estado</span>
+                                        {renderSortIcon('status')}
+                                    </div>
+                                </th>
+                                <th
+                                    onClick={() => handleSort('amount')}
+                                    style={{ padding: '1rem', textAlign: 'right', color: sortConfig.key === 'amount' ? '#2563eb' : 'var(--text-muted)', cursor: 'pointer', userSelect: 'none' }}
+                                    title="Hacer clic para ordenar por Prima Anual"
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
+                                        <span>Prima</span>
+                                        {renderSortIcon('amount')}
+                                    </div>
+                                </th>
+                                <th style={{ padding: '1rem', textAlign: 'right', color: 'var(--text-muted)' }}>Acciones</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {policies.map((policy) => {
+                            {sortedPolicies.length === 0 ? (
+                                <tr>
+                                    <td colSpan={7} style={{ padding: '3rem', textAlign: 'center', color: 'var(--text-muted)' }}>
+                                        {statusTab === 'CANCELLED' 
+                                            ? 'No hay pólizas canceladas actualmente.' 
+                                            : statusTab === 'PENDING'
+                                            ? 'No hay pólizas con pago pendiente.'
+                                            : `No se encontraron pólizas que coincidan con "${searchTerm}".`}
+                                    </td>
+                                </tr>
+                            ) : (
+                                sortedPolicies.map((policy) => {
                                 const computedStatus = calculatePolicyStatus(policy, payments);
                                 const statusConfirm = getStatusColor(computedStatus);
                                 const StatusIcon = statusConfirm.icon;
+                                const itemClaims = getPolicyClaims(policy, claims);
+                                const itemOpenClaims = itemClaims.filter(isOpenClaim);
+
                                 return (
                                     <tr
                                         key={policy.id}
-                                        style={{ borderBottom: '1px solid var(--border)', cursor: 'pointer', transition: 'background-color 0.1s' }}
+                                        style={{ 
+                                            borderBottom: '1px solid var(--border)', 
+                                            cursor: 'pointer', 
+                                            transition: 'background-color 0.1s',
+                                            backgroundColor: itemOpenClaims.length > 0 ? '#fffafa' : 'transparent'
+                                        }}
                                         onClick={() => setSelectedPolicy(policy)}
                                         className="hover-row"
                                     >
-                                        <td style={{ padding: '1rem', fontWeight: 'bold' }}>{policy.id}</td>
-                                        <td style={{ padding: '1rem', fontWeight: '600', color: 'var(--primary)' }}>{policy.client}</td>
+                                        <td style={{ padding: '1rem' }}>
+                                            <div style={{ fontWeight: 'bold', color: 'var(--text-main)' }}>{policy.id}</div>
+                                            {itemOpenClaims.length > 0 && (
+                                                <div style={{ marginTop: '0.3rem' }}>
+                                                    <span 
+                                                        style={{
+                                                            display: 'inline-flex',
+                                                            alignItems: 'center',
+                                                            gap: '0.25rem',
+                                                            padding: '0.15rem 0.5rem',
+                                                            borderRadius: '999px',
+                                                            backgroundColor: '#fee2e2',
+                                                            color: '#dc2626',
+                                                            border: '1px solid #fca5a5',
+                                                            fontSize: '0.72rem',
+                                                            fontWeight: '800',
+                                                            boxShadow: '0 1px 2px rgba(220, 38, 38, 0.1)'
+                                                        }}
+                                                        title={`Esta póliza tiene ${itemOpenClaims.length} siniestro(s) en trámite: ${itemOpenClaims.map(c => `${c.id} (${c.type})`).join(', ')}`}
+                                                    >
+                                                        <ShieldAlert size={12} /> Siniestro Abierto ({itemOpenClaims.length})
+                                                    </span>
+                                                </div>
+                                            )}
+                                        </td>
+                                        <td style={{ padding: '1rem' }}>
+                                            <div style={{ fontWeight: '600', color: 'var(--primary)', fontSize: '0.98rem' }}>{policy.client}</div>
+                                            <div style={{ marginTop: '0.25rem', display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
+                                                <span style={{
+                                                    fontSize: '0.72rem',
+                                                    padding: '0.12rem 0.5rem',
+                                                    borderRadius: '999px',
+                                                    fontWeight: '700',
+                                                    backgroundColor: (policy.cartera || '').toLowerCase().includes('raquel') ? '#fdf4ff' : '#eff6ff',
+                                                    color: (policy.cartera || '').toLowerCase().includes('raquel') ? '#86198f' : '#1e40af',
+                                                    border: (policy.cartera || '').toLowerCase().includes('raquel') ? '1px solid #f0abfc' : '1px solid #bfdbfe',
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                    gap: '0.25rem'
+                                                }}>
+                                                    <Briefcase size={11} />
+                                                    {(policy.cartera || '').toLowerCase().includes('raquel') ? 'Raquel Rodríguez' : 'Santiago Morales & Asoc.'}
+                                                    {policy.agentCode ? ` · ${policy.agentCode}` : ''}
+                                                </span>
+                                            </div>
+                                        </td>
                                         <td style={{ padding: '1rem' }}>
                                             <div style={{ fontWeight: '500' }}>{policy.type}</div>
                                             <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.2rem' }}>
@@ -650,7 +2620,14 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
                                                 <span>{policy.insurer}</span>
                                             </div>
                                         </td>
-                                        <td style={{ padding: '1rem' }}>{formatDateToDDMMYYYY(getNextRenewalDate(policy.startDate, policy.renewalFrequency) || policy.renewal || 'N/A')}</td>
+                                        <td style={{ padding: '1rem' }}>
+                                            <div style={{ fontWeight: '600', color: 'var(--text-main)' }}>
+                                                {formatDateToDDMMYYYY(policy.endDate || policy.renewal || 'N/A')}
+                                            </div>
+                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                                                Inicio: {formatDateToDDMMYYYY(policy.startDate)}
+                                            </div>
+                                        </td>
                                         <td style={{ padding: '1rem' }}>
                                             <span style={{
                                                 display: 'inline-flex',
@@ -664,18 +2641,45 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
                                                 color: statusConfirm.text
                                             }}>
                                                 <StatusIcon size={14} />
-                                                {computedStatus === 'Active' ? 'Vigente' : computedStatus === 'Pending' ? 'Pendiente' : computedStatus === 'Expiring' ? 'Por Vencer' : 'Cancelada'}
+                                                {statusConfirm.label}
                                             </span>
                                         </td>
                                         <td style={{ padding: '1rem', textAlign: 'right', fontWeight: '600' }}>{formatMoney(policy.amount, policy.currency)}</td>
                                         <td style={{ padding: '1rem', textAlign: 'right' }}>
-                                            <button className="btn" style={{ padding: '0.5rem', color: 'var(--text-muted)' }}>
-                                                <ChevronRight size={20} />
-                                            </button>
+                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.5rem' }}>
+                                                {computedStatus === 'Cancelled' && (
+                                                    <button
+                                                        className="btn"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            handleReactivatePolicy(policy);
+                                                        }}
+                                                        style={{
+                                                            padding: '0.35rem 0.75rem',
+                                                            backgroundColor: '#166534',
+                                                            color: 'white',
+                                                            fontSize: '0.8rem',
+                                                            fontWeight: '700',
+                                                            borderRadius: '4px',
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            gap: '0.35rem',
+                                                            border: 'none',
+                                                            cursor: 'pointer'
+                                                        }}
+                                                        title="Reabrir y reactivar póliza como Vigente"
+                                                    >
+                                                        <RotateCw size={13} /> Reabrir
+                                                    </button>
+                                                )}
+                                                <button className="btn" style={{ padding: '0.5rem', color: 'var(--text-muted)' }}>
+                                                    <ChevronRight size={20} />
+                                                </button>
+                                            </div>
                                         </td>
                                     </tr>
                                 );
-                            })}
+                            }))}
                         </tbody>
                     </table>
                     <style>{`
@@ -751,8 +2755,48 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
                                         <InsurerSelect
                                             companies={companies}
                                             value={newPolicy.insurer}
-                                            onChange={e => setNewPolicy({ ...newPolicy, insurer: e.target.value })}
+                                            onChange={e => {
+                                                const insurerVal = e.target.value;
+                                                const autoCode = getAutoAgentCode(newPolicy.cartera, insurerVal);
+                                                setNewPolicy({ 
+                                                    ...newPolicy, 
+                                                    insurer: insurerVal,
+                                                    agentCode: autoCode || newPolicy.agentCode
+                                                });
+                                            }}
                                             placeholder="Seleccionar Aseguradora..."
+                                        />
+                                    </div>
+                                    <div>
+                                        <label style={{ fontSize: '0.75rem', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: '0.4rem' }}>Cartera de Agente *</label>
+                                        <select
+                                            style={{ width: '100%', padding: '0.5rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', fontWeight: '600' }}
+                                            value={newPolicy.cartera}
+                                            onChange={e => {
+                                                const carteraVal = e.target.value;
+                                                const autoCode = getAutoAgentCode(carteraVal, newPolicy.insurer);
+                                                setNewPolicy({ 
+                                                    ...newPolicy, 
+                                                    cartera: carteraVal,
+                                                    agentCode: autoCode || newPolicy.agentCode
+                                                });
+                                            }}
+                                        >
+                                            <option value="Santiago Morales y Asociados, S.R.L.">💼 Santiago Morales y Asociados, S.R.L.</option>
+                                            <option value="Raquel Rodríguez">💼 Raquel Rodríguez</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                                    <div>
+                                        <label style={{ fontSize: '0.75rem', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: '0.4rem' }}>Código en Compañía (Agente)</label>
+                                        <input
+                                            type="text"
+                                            placeholder="Ej. 76713, 8055, 897"
+                                            value={newPolicy.agentCode}
+                                            onChange={e => setNewPolicy({ ...newPolicy, agentCode: e.target.value })}
+                                            style={{ width: '100%', padding: '0.5rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}
                                         />
                                     </div>
                                     <div>
@@ -1096,6 +3140,9 @@ const PolicyList = ({ policies, setPolicies, clients = [], setClients, payments 
                     </div>
                 </div>
             )}
+
+            {/* Modal de Edición Completa de Póliza */}
+            {renderEditPolicyModalContent()}
         </div>
     );
 };
