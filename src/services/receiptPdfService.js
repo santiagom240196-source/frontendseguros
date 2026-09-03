@@ -63,6 +63,24 @@ export const generateReceiptPdf = async (payment, policy = {}, client = {}) => {
   const formattedAmount = formatMoney(rawAmount, currency);
   const wordsAmount = numberToWordsSpanish(rawAmount, currency);
 
+  // Cálculo del Balance Restante
+  const policyPremium = Number(policy.amountNum) || parseFloat(String(policy.amount || payment.policyAmount || '0').replace(/[^0-9.]/g, '')) || 0;
+  let remainingBalance = 0;
+  if (payment.remainingBalance !== undefined && payment.remainingBalance !== null) {
+    remainingBalance = Number(payment.remainingBalance);
+  } else if (payment.balanceAfter !== undefined && payment.balanceAfter !== null) {
+    remainingBalance = Number(payment.balanceAfter);
+  } else if (payment.totalOwed !== undefined && payment.totalOwed !== null) {
+    remainingBalance = Math.max(0, Number(payment.totalOwed) - rawAmount);
+  } else if (policy.totalOwed !== undefined && policy.totalOwed !== null) {
+    remainingBalance = Number(policy.totalOwed);
+  } else if (policy.balance !== undefined && policy.balance !== null) {
+    remainingBalance = Number(policy.balance);
+  } else if (policyPremium > 0) {
+    remainingBalance = Math.max(0, policyPremium - rawAmount);
+  }
+  const formattedRemaining = formatMoney(remainingBalance, currency);
+
   const paymentDate = payment.date || new Date().toISOString().split('T')[0];
   const paymentMethod = payment.paymentMethod || 'Efectivo';
   const concept = payment.type || (isMulti ? 'Pago Consolidado Multipóliza' : 'Pago de Cuota / Prima de Seguro');
@@ -302,24 +320,27 @@ export const generateReceiptPdf = async (payment, policy = {}, client = {}) => {
   if (isMulti && items.length > 0) {
     const tableBody = items.map(it => {
       const itAmount = Number(it.amountNum) || parseFloat(String(it.amount || '0').replace(/[^0-9.]/g, '')) || 0;
+      const itRemaining = it.remainingBalance !== undefined ? it.remainingBalance : it.totalOwed !== undefined ? Math.max(0, it.totalOwed - itAmount) : 0;
       return [
         it.client || clientName,
         it.policyId || it.policy || 'N/A',
         `${it.insurer || 'Aseguradora'} · ${it.type || 'Póliza'}`,
         it.concept || it.paymentType || 'Cuota',
-        formatMoney(itAmount, currency)
+        formatMoney(itAmount, currency),
+        itRemaining > 0 ? formatMoney(itRemaining, currency) : `${formatMoney(0, currency)} (Al Día)`
       ];
     });
 
     autoTable(doc, {
       startY: currentY,
       margin: { left: 14, right: 14 },
-      head: [['CLIENTE / TITULAR', 'PÓLIZA #', 'ASEGURADORA & RAMO', 'CONCEPTO', 'MONTO APLICADO']],
+      head: [['CLIENTE / TITULAR', 'PÓLIZA #', 'ASEGURADORA & RAMO', 'CONCEPTO', 'PAGADO', 'RESTANTE']],
       body: tableBody,
       foot: [
         [
           { content: `TOTAL DISTRIBUIDO (${items.length} PÓLIZAS)`, colSpan: 4, styles: { halign: 'right', fontStyle: 'bold' } },
-          { content: formattedAmount, styles: { halign: 'right', fontStyle: 'bold', textColor: [180, 83, 9] } }
+          { content: formattedAmount, styles: { halign: 'right', fontStyle: 'bold', textColor: [180, 83, 9] } },
+          { content: isFullyPaid ? 'AL DÍA' : `Resta: ${formattedRemaining}`, styles: { halign: 'right', fontStyle: 'bold', textColor: isFullyPaid ? [22, 101, 52] : [153, 27, 27] } }
         ]
       ],
       headStyles: {
@@ -338,11 +359,12 @@ export const generateReceiptPdf = async (payment, policy = {}, client = {}) => {
         cellPadding: 3.5,
       },
       columnStyles: {
-        0: { cellWidth: 48 },
-        1: { cellWidth: 38, fontStyle: 'bold' },
-        2: { cellWidth: 42 },
-        3: { cellWidth: 26 },
-        4: { cellWidth: 28, halign: 'right', fontStyle: 'bold' }
+        0: { cellWidth: 42 },
+        1: { cellWidth: 32, fontStyle: 'bold' },
+        2: { cellWidth: 38 },
+        3: { cellWidth: 22 },
+        4: { cellWidth: 24, halign: 'right', fontStyle: 'bold' },
+        5: { cellWidth: 24, halign: 'right', fontStyle: 'bold' }
       },
       styles: {
         fontSize: 8,
@@ -359,14 +381,14 @@ export const generateReceiptPdf = async (payment, policy = {}, client = {}) => {
     autoTable(doc, {
       startY: currentY,
       margin: { left: 14, right: 14 },
-      head: [['CONCEPTO / DESCRIPCIÓN', 'REFERENCIA', 'MÉTODO', 'ESTADO', 'SUBTOTAL']],
+      head: [['CONCEPTO / DESCRIPCIÓN', 'REFERENCIA', 'PAGADO', 'RESTANTE', 'ESTADO']],
       body: [
         [
           concept,
           `Póliza ${policyId}`,
-          paymentMethod,
-          payment.status === 'Paid' || payment.status === 'Pagado' ? 'PAGADO' : 'PENDIENTE',
-          formattedAmount
+          formattedAmount,
+          remainingBalance > 0 ? formattedRemaining : `${formatMoney(0, currency)} (Al Día)`,
+          payment.status === 'Paid' || payment.status === 'Pagado' ? 'PAGADO' : 'PENDIENTE'
         ]
       ],
       headStyles: {
@@ -377,12 +399,26 @@ export const generateReceiptPdf = async (payment, policy = {}, client = {}) => {
         halign: 'left',
         cellPadding: 3.5,
       },
+      footStyles: {
+        fillColor: [254, 243, 199],
+        textColor: primaryColor,
+        fontSize: 8.5,
+        fontStyle: 'bold',
+        cellPadding: 3.5,
+      },
+      foot: [
+        [
+          { content: 'TOTAL PAGADO EN ESTE RECIBO:', colSpan: 2, styles: { halign: 'right', fontStyle: 'bold' } },
+          { content: formattedAmount, styles: { halign: 'right', fontStyle: 'bold', textColor: [180, 83, 9] } },
+          { content: `Resta: ${formattedRemaining}`, colSpan: 2, styles: { halign: 'center', fontStyle: 'bold', textColor: remainingBalance > 0 ? [153, 27, 27] : [22, 101, 52] } }
+        ]
+      ],
       columnStyles: {
-        0: { cellWidth: 70 },
-        1: { cellWidth: 40 },
-        2: { cellWidth: 26 },
-        3: { cellWidth: 22, halign: 'center' },
-        4: { cellWidth: 24, halign: 'right', fontStyle: 'bold' }
+        0: { cellWidth: 68 },
+        1: { cellWidth: 38 },
+        2: { cellWidth: 26, halign: 'right', fontStyle: 'bold' },
+        3: { cellWidth: 28, halign: 'right', fontStyle: 'bold' },
+        4: { cellWidth: 22, halign: 'center' }
       },
       styles: {
         fontSize: 8.5,

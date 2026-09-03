@@ -1,16 +1,26 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Search, DollarSign, Plus, Download, CheckCircle, Clock, AlertTriangle, XCircle, Calendar, Printer, FileText, ArrowUpDown, ArrowUp, ArrowDown, Zap, Loader2, Users, Layers, Trash2, Check, RefreshCw, Sparkles } from 'lucide-react';
-import { getPolicyPaymentStats, formatDateToDDMMYYYY, formatMoney } from '../utils/policyHelpers';
+import { Search, DollarSign, Plus, Download, CheckCircle, Clock, AlertTriangle, XCircle, Calendar, Printer, FileText, ArrowUpDown, ArrowUp, ArrowDown, Zap, Loader2, Users, Layers, Trash2, Check, RefreshCw, Sparkles, Edit3, Paperclip, Eye, Upload, ShieldCheck, ShieldAlert, FileCheck } from 'lucide-react';
+import { getPolicyPaymentStats, formatDateToDDMMYYYY, formatMoney, getNextRenewalDate } from '../utils/policyHelpers';
 import InsurerLogo from './InsurerLogo';
 import ReceiptModal from './ReceiptModal';
+import DocumentViewerModal from './DocumentViewerModal';
 import { generateReceiptPdfDataUri } from '../services/receiptPdfService';
+import { fileToDataUri, formatFileSize } from '../services/documentsService';
 
 import { useUser } from '../context/UserContext';
-import { insertCobroHasura, updateCobroHasura } from '../services/hasuraService';
+import { insertCobroHasura, updateCobroHasura, deleteCobroHasura, updatePolicyHasura, insertMovimientoHasura } from '../services/hasuraService';
 
-const PaymentManagement = ({ policies = [], payments = [], setPayments, clients = [], shouldOpenPaymentModal, onDetailedActionHandled }) => {
-    const { isDemo } = useUser();
+const PaymentManagement = ({ policies = [], setPolicies, payments = [], setPayments, clients = [], shouldOpenPaymentModal, onDetailedActionHandled }) => {
+    const { isDemo, currentUser } = useUser();
     const today = new Date().toISOString().split('T')[0];
+
+    // Permiso estricto de edición: Solo Santiago Morales / Administrador Principal
+    const canEditPayments = Boolean(
+        currentUser?.isPrimary || 
+        currentUser?.username?.toLowerCase() === 'santiagom2401' || 
+        currentUser?.id === 'santiagom2401' ||
+        currentUser?.role?.includes('Administrador')
+    );
 
     // Default date range: first day of current month → today
     const firstOfMonth = new Date();
@@ -26,6 +36,30 @@ const PaymentManagement = ({ policies = [], payments = [], setPayments, clients 
     // Receipt Modal State
     const [selectedReceiptPayment, setSelectedReceiptPayment] = useState(null);
     const [showReceiptModal, setShowReceiptModal] = useState(false);
+
+    // Document Viewer Modal State
+    const [selectedViewingDoc, setSelectedViewingDoc] = useState(null);
+    const [showDocViewer, setShowDocViewer] = useState(false);
+
+    // Document Attachment State for Create Modal
+    const [singleAttachedDocs, setSingleAttachedDocs] = useState([]);
+    const [multiAttachedDocs, setMultiAttachedDocs] = useState([]);
+
+    // Edit Payment Modal State (Santiago Only)
+    const [editingPayment, setEditingPayment] = useState(null);
+    const [showEditModal, setShowEditModal] = useState(false);
+    const [editFormData, setEditFormData] = useState({
+        amount: '',
+        date: today,
+        type: 'Cuota Mensual',
+        customType: '',
+        paymentMethod: 'Efectivo',
+        reference: '',
+        status: 'Paid',
+        notes: ''
+    });
+    const [editAttachedDocs, setEditAttachedDocs] = useState([]);
+    const [isSavingEdit, setIsSavingEdit] = useState(false);
 
     // Modal Mode: 'single' (1 Póliza) vs 'multi' (Multipóliza / Multicliente)
     const [paymentMode, setPaymentMode] = useState('single');
@@ -237,6 +271,10 @@ const PaymentManagement = ({ policies = [], payments = [], setPayments, clients 
         
         const matchedPolicy = policies.find(p => p.id === newPayment.selectedPolicyId);
 
+        const policyStats = matchedPolicy ? getPolicyPaymentStats(matchedPolicy, payments) : null;
+        const totalOwedBefore = policyStats ? policyStats.totalOwed : (matchedPolicy?.amount || 0);
+        const remainingBalance = Math.max(0, totalOwedBefore - cleanAmount);
+
         // Generar el documento PDF del recibo para almacenarlo en la base de datos
         let pdfDataUri = null;
         try {
@@ -252,7 +290,9 @@ const PaymentManagement = ({ policies = [], payments = [], setPayments, clients 
                     paymentMethod: newPayment.paymentMethod || 'Efectivo',
                     policyId: newPayment.selectedPolicyId,
                     policy: newPayment.policy,
-                    reference: newPayment.reference || ''
+                    reference: newPayment.reference || '',
+                    remainingBalance: remainingBalance,
+                    totalPremium: matchedPolicy?.amount || 0
                 },
                 matchedPolicy || {},
                 {}
@@ -271,27 +311,77 @@ const PaymentManagement = ({ policies = [], payments = [], setPayments, clients 
             date: newPayment.date,
             amount: formatMoney(cleanAmount),
             amountNum: cleanAmount,
+            remainingBalance: remainingBalance,
+            totalPremium: matchedPolicy?.amount || 0,
             status: newPayment.status,
             type: newPayment.type === 'Otro' ? (newPayment.customType || 'Otro') : newPayment.type,
             paymentMethod: newPayment.paymentMethod || 'Efectivo',
             reference: newPayment.reference || '',
             receiptUrl: pdfDataUri,
-            comprobante: pdfDataUri
+            comprobante: singleAttachedDocs.length > 0 ? singleAttachedDocs[0].dataUri : pdfDataUri,
+            attachedDocs: singleAttachedDocs
         };
 
         if (setPayments) {
             setPayments([paymentToAdd, ...payments]);
         }
 
+        // REGLA DE NEGOCIO: Si la póliza estaba cancelada, reabrirla automáticamente
+        if (matchedPolicy && (matchedPolicy.status === 'Cancelada' || matchedPolicy.status === 'Cancelled')) {
+            const todayStr = new Date().toISOString().split('T')[0];
+            const nextEndDate = getNextRenewalDate(todayStr, matchedPolicy.renewalFrequency || 'Anual');
+            const reactivatedPolicy = {
+                ...matchedPolicy,
+                status: 'Active',
+                lastRenewalDate: todayStr,
+                endDate: nextEndDate,
+                renewal: nextEndDate,
+                movements: [
+                    ...(matchedPolicy.movements || []),
+                    {
+                        id: (matchedPolicy.movements?.length || 0) + 1,
+                        date: todayStr,
+                        type: 'Reapertura Automática por Pago',
+                        description: `Póliza reactivada automáticamente tras registrarse cobro ${paymentId} (${formatMoney(cleanAmount)}). Vigencia extendida hasta ${formatDateToDDMMYYYY(nextEndDate)}.`,
+                        evidence: 'Recibo ' + paymentId
+                    }
+                ]
+            };
+
+            if (setPolicies) {
+                setPolicies(prev => prev.map(p => p.id === matchedPolicy.id ? reactivatedPolicy : p));
+            }
+        }
+
         if (!isDemo) {
             try {
                 await insertCobroHasura(paymentToAdd, isDemo);
+
+                if (matchedPolicy && (matchedPolicy.status === 'Cancelada' || matchedPolicy.status === 'Cancelled')) {
+                    const todayStr = new Date().toISOString().split('T')[0];
+                    const nextEndDate = getNextRenewalDate(todayStr, matchedPolicy.renewalFrequency || 'Anual');
+
+                    await updatePolicyHasura(matchedPolicy.rawId || matchedPolicy.id, {
+                        status: 'Active',
+                        vigencia_fin: nextEndDate,
+                        vigencia_inicio: todayStr
+                    }, isDemo);
+
+                    await insertMovimientoHasura({
+                        polizaId: matchedPolicy.rawId || matchedPolicy.id,
+                        date: todayStr,
+                        type: 'Reapertura Automática por Pago',
+                        description: `Póliza reactivada automáticamente tras registrarse cobro ${paymentId} (${formatMoney(cleanAmount)}).`,
+                        evidence: 'Recibo ' + paymentId
+                    }, isDemo);
+                }
             } catch (err) {
                 console.warn('Failed to insert cobro in Hasura:', err);
             }
         }
 
         setShowModal(false);
+        setSingleAttachedDocs([]);
         setNewPayment({ 
             client: '', policy: '', date: today, amount: '', 
             policyAmount: '', type: 'Cuota Mensual', customType: '', 
@@ -411,16 +501,55 @@ const PaymentManagement = ({ policies = [], payments = [], setPayments, clients 
                 }
 
                 subPaymentData.receiptUrl = individualPdfDataUri || masterPdfDataUri;
-                subPaymentData.comprobante = individualPdfDataUri || masterPdfDataUri;
+                subPaymentData.comprobante = multiAttachedDocs.length > 0 ? multiAttachedDocs[0].dataUri : (individualPdfDataUri || masterPdfDataUri);
+                subPaymentData.attachedDocs = multiAttachedDocs;
                 subPaymentData.individualReceiptUrl = individualPdfDataUri;
                 subPaymentData.masterReceiptUrl = masterPdfDataUri;
 
                 subPayments.push(subPaymentData);
             }
 
+            if (multiAttachedDocs.length > 0) {
+                masterPaymentObj.attachedDocs = multiAttachedDocs;
+                masterPaymentObj.comprobante = multiAttachedDocs[0].dataUri;
+            }
+
             // Guardar pagos en estado y en Hasura
             if (setPayments) {
                 setPayments([...subPayments, ...payments]);
+            }
+
+            // REGLA DE NEGOCIO: Reabrir automáticamente pólizas canceladas incluidas en el lote
+            const cancelledItems = selectedPoliciesForBatch.filter(item => {
+                const pol = policies.find(p => p.id === item.id);
+                return pol && (pol.status === 'Cancelada' || pol.status === 'Cancelled');
+            });
+
+            if (cancelledItems.length > 0 && setPolicies) {
+                const todayStr = new Date().toISOString().split('T')[0];
+                setPolicies(prev => prev.map(p => {
+                    if (cancelledItems.some(c => c.id === p.id)) {
+                        const nextEndDate = getNextRenewalDate(todayStr, p.renewalFrequency || 'Anual');
+                        return {
+                            ...p,
+                            status: 'Active',
+                            lastRenewalDate: todayStr,
+                            endDate: nextEndDate,
+                            renewal: nextEndDate,
+                            movements: [
+                                ...(p.movements || []),
+                                {
+                                    id: (p.movements?.length || 0) + 1,
+                                    date: todayStr,
+                                    type: 'Reapertura Automática por Pago',
+                                    description: `Póliza reactivada automáticamente tras registrarse cobro consolidado ${masterPaymentId}.`,
+                                    evidence: 'Recibo Maestro ' + masterPaymentId
+                                }
+                            ]
+                        };
+                    }
+                    return p;
+                }));
             }
 
             if (!isDemo) {
@@ -431,9 +560,34 @@ const PaymentManagement = ({ policies = [], payments = [], setPayments, clients 
                         console.warn('Error guardando subcobro en Hasura:', err);
                     }
                 }
+
+                for (const item of cancelledItems) {
+                    try {
+                        const todayStr = new Date().toISOString().split('T')[0];
+                        const pol = policies.find(p => p.id === item.id);
+                        const nextEndDate = getNextRenewalDate(todayStr, pol?.renewalFrequency || 'Anual');
+
+                        await updatePolicyHasura(item.rawId || item.id, {
+                            status: 'Active',
+                            vigencia_fin: nextEndDate,
+                            vigencia_inicio: todayStr
+                        }, isDemo);
+
+                        await insertMovimientoHasura({
+                            polizaId: item.rawId || item.id,
+                            date: todayStr,
+                            type: 'Reapertura Automática por Pago',
+                            description: `Póliza reactivada automáticamente tras registrarse cobro consolidado ${masterPaymentId}.`,
+                            evidence: 'Recibo Maestro ' + masterPaymentId
+                        }, isDemo);
+                    } catch (itemErr) {
+                        console.warn('Error reactivating policy in batch:', itemErr);
+                    }
+                }
             }
 
             setShowModal(false);
+            setMultiAttachedDocs([]);
             setMultiPaymentForm({
                 totalAmount: '',
                 payerName: '',
@@ -455,6 +609,221 @@ const PaymentManagement = ({ policies = [], payments = [], setPayments, clients 
             alert('Ocurrió un error al procesar el pago múltiple.');
         } finally {
             setIsSavingMulti(false);
+        }
+    };
+
+    // ─── Handlers para Documentos y Edición de Pagos (Solo Santiago) ───
+
+    const handleSingleFileChange = async (e) => {
+        if (e.target.files && e.target.files.length > 0) {
+            const filesArray = Array.from(e.target.files);
+            try {
+                const newDocs = await Promise.all(
+                    filesArray.map(async (file) => {
+                        const dataUri = await fileToDataUri(file);
+                        return {
+                            id: `doc_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                            name: file.name,
+                            size: formatFileSize(file.size),
+                            type: file.type,
+                            dataUri,
+                            date: newPayment.date
+                        };
+                    })
+                );
+                setSingleAttachedDocs(prev => [...prev, ...newDocs]);
+            } catch (err) {
+                console.error('Error reading files:', err);
+                alert('No se pudo cargar uno o más archivos seleccionados.');
+            }
+            e.target.value = '';
+        }
+    };
+
+    const handleRemoveSingleDoc = (docId) => {
+        setSingleAttachedDocs(prev => prev.filter(d => d.id !== docId));
+    };
+
+    const handleMultiFileChange = async (e) => {
+        if (e.target.files && e.target.files.length > 0) {
+            const filesArray = Array.from(e.target.files);
+            try {
+                const newDocs = await Promise.all(
+                    filesArray.map(async (file) => {
+                        const dataUri = await fileToDataUri(file);
+                        return {
+                            id: `doc_multi_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                            name: file.name,
+                            size: formatFileSize(file.size),
+                            type: file.type,
+                            dataUri,
+                            date: multiPaymentForm.date
+                        };
+                    })
+                );
+                setMultiAttachedDocs(prev => [...prev, ...newDocs]);
+            } catch (err) {
+                console.error('Error reading files:', err);
+                alert('No se pudo cargar uno o más archivos seleccionados.');
+            }
+            e.target.value = '';
+        }
+    };
+
+    const handleRemoveMultiDoc = (docId) => {
+        setMultiAttachedDocs(prev => prev.filter(d => d.id !== docId));
+    };
+
+    const handleOpenEditModal = (payment) => {
+        if (!canEditPayments) {
+            alert('Solo el usuario administrador principal (Santiago Morales) tiene autorización para modificar pagos.');
+            return;
+        }
+        setEditingPayment(payment);
+        setEditFormData({
+            amount: payment.amountNum ? String(payment.amountNum) : String(payment.amount || '').replace(/[^0-9.]/g, ''),
+            date: payment.date || today,
+            type: ['Cuota Mensual', 'Renovación', 'Anual', 'Semestral', 'Inicial', 'Otro'].includes(payment.type) ? payment.type : 'Otro',
+            customType: !['Cuota Mensual', 'Renovación', 'Anual', 'Semestral', 'Inicial'].includes(payment.type) ? (payment.type || '') : '',
+            paymentMethod: payment.paymentMethod || 'Efectivo',
+            reference: payment.reference || '',
+            status: payment.status || 'Paid',
+            notes: payment.notes || ''
+        });
+        setEditAttachedDocs(payment.attachedDocs || (payment.comprobante && payment.comprobante.startsWith('data:') ? [{
+            id: `doc_${payment.id}`,
+            name: `Comprobante_${payment.id}`,
+            type: payment.comprobante.startsWith('data:application/pdf') ? 'application/pdf' : 'image/jpeg',
+            dataUri: payment.comprobante,
+            date: payment.date
+        }] : []));
+        setShowEditModal(true);
+    };
+
+    const handleEditFileChange = async (e) => {
+        if (e.target.files && e.target.files.length > 0) {
+            const filesArray = Array.from(e.target.files);
+            try {
+                const newDocs = await Promise.all(
+                    filesArray.map(async (file) => {
+                        const dataUri = await fileToDataUri(file);
+                        return {
+                            id: `doc_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                            name: file.name,
+                            size: formatFileSize(file.size),
+                            type: file.type,
+                            dataUri,
+                            date: editFormData.date
+                        };
+                    })
+                );
+                setEditAttachedDocs(prev => [...prev, ...newDocs]);
+            } catch (err) {
+                console.error('Error reading files:', err);
+                alert('No se pudo cargar uno o más archivos seleccionados.');
+            }
+            e.target.value = '';
+        }
+    };
+
+    const handleRemoveEditAttachedDoc = (docId) => {
+        setEditAttachedDocs(prev => prev.filter(d => d.id !== docId));
+    };
+
+    const handleSaveEditedPayment = async (e) => {
+        e.preventDefault();
+        if (!editingPayment) return;
+
+        setIsSavingEdit(true);
+        try {
+            const cleanAmount = parseFloat(String(editFormData.amount || '0').replace(/[^0-9.]/g, '')) || 0;
+            if (cleanAmount <= 0) {
+                alert('Por favor ingresa un monto válido.');
+                setIsSavingEdit(false);
+                return;
+            }
+
+            const matchedPolicy = policies.find(p => p.id === editingPayment.policyId || editingPayment.policy?.includes(p.id));
+            const policyStats = matchedPolicy ? getPolicyPaymentStats(matchedPolicy, payments) : null;
+            const totalOwedBefore = policyStats ? policyStats.totalOwed : (matchedPolicy?.amount || 0);
+            const remainingBalance = Math.max(0, totalOwedBefore - cleanAmount);
+            const finalType = editFormData.type === 'Otro' ? (editFormData.customType || 'Otro') : editFormData.type;
+
+            const updatedPayment = {
+                ...editingPayment,
+                amount: formatMoney(cleanAmount, editingPayment.currency || 'DOP'),
+                amountNum: cleanAmount,
+                date: editFormData.date,
+                type: finalType,
+                paymentMethod: editFormData.paymentMethod,
+                reference: (editFormData.reference || '').trim(),
+                status: editFormData.status,
+                notes: (editFormData.notes || '').trim(),
+                remainingBalance: remainingBalance,
+                attachedDocs: editAttachedDocs,
+                comprobante: editAttachedDocs.length > 0 ? editAttachedDocs[0].dataUri : editingPayment.comprobante
+            };
+
+            // Regenerar Recibo Oficial en PDF
+            try {
+                const newPdfDataUri = await generateReceiptPdfDataUri(
+                    updatedPayment,
+                    matchedPolicy || {},
+                    {}
+                );
+                if (newPdfDataUri) {
+                    updatedPayment.receiptUrl = newPdfDataUri;
+                }
+            } catch (pdfErr) {
+                console.warn('Error regenerating receipt PDF on edit:', pdfErr);
+            }
+
+            // Actualizar estado local
+            setPayments(prev => prev.map(p => p.id === editingPayment.id ? updatedPayment : p));
+
+            // Actualizar en Hasura si no es demo
+            if (!isDemo) {
+                try {
+                    await updateCobroHasura(editingPayment.id || editingPayment.rawId, {
+                        amount: cleanAmount,
+                        date: editFormData.date,
+                        type: finalType,
+                        paymentMethod: editFormData.paymentMethod,
+                        status: editFormData.status,
+                        notes: (editFormData.notes || '').trim(),
+                        receiptUrl: updatedPayment.receiptUrl,
+                        comprobante: updatedPayment.comprobante
+                    }, isDemo);
+                } catch (dbErr) {
+                    console.warn('Error updating payment in Hasura:', dbErr);
+                }
+            }
+
+            setShowEditModal(false);
+            setEditingPayment(null);
+        } catch (err) {
+            console.error('Error saving edited payment:', err);
+            alert(`Error al guardar cambios: ${err.message}`);
+        } finally {
+            setIsSavingEdit(false);
+        }
+    };
+
+    const handleDeletePayment = async (payment) => {
+        if (!canEditPayments) {
+            alert('Solo el usuario administrador principal (Santiago Morales) tiene autorización para eliminar pagos.');
+            return;
+        }
+        const confirmDelete = window.confirm(`¿Estás seguro de que deseas eliminar el registro de pago ${payment.id} de "${payment.client}" por ${formatMoney(payment.amountNum || payment.amount)}?\n\nEsta acción revertirá el cobro.`);
+        if (!confirmDelete) return;
+
+        setPayments(prev => prev.filter(p => p.id !== payment.id));
+        if (!isDemo) {
+            try {
+                await deleteCobroHasura(payment.id || payment.rawId, isDemo);
+            } catch (dbErr) {
+                console.warn('Error deleting payment in Hasura:', dbErr);
+            }
         }
     };
 
@@ -956,30 +1325,113 @@ const PaymentManagement = ({ policies = [], payments = [], setPayments, clients 
                                         </td>
                                         <td style={{ padding: '1rem', textAlign: 'right', fontWeight: '700' }}>{formatMoney(payment.amount)}</td>
                                         <td style={{ padding: '1rem', textAlign: 'right' }}>
-                                            <button 
-                                                className="btn" 
-                                                onClick={() => {
-                                                    setSelectedReceiptPayment(payment);
-                                                    setShowReceiptModal(true);
-                                                }}
-                                                style={{ 
-                                                    padding: '0.45rem 0.85rem', 
-                                                    color: 'var(--primary)', 
-                                                    backgroundColor: '#f8fafc',
-                                                    border: '1px solid #cbd5e1',
-                                                    borderRadius: 'var(--radius-sm)',
-                                                    display: 'inline-flex',
-                                                    alignItems: 'center',
-                                                    gap: '0.4rem',
-                                                    fontSize: '0.82rem',
-                                                    fontWeight: '700',
-                                                    cursor: 'pointer',
-                                                    boxShadow: '0 1px 2px rgba(0,0,0,0.05)'
-                                                }}
-                                                title="Ver e Imprimir Recibo Oficial de Pago (PDF)"
-                                            >
-                                                <Printer size={14} color="#d97706" /> Recibo PDF
-                                            </button>
+                                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                                                {/* Botón Ver / Imprimir Recibo Oficial PDF */}
+                                                <button 
+                                                    className="btn" 
+                                                    onClick={() => {
+                                                        setSelectedReceiptPayment(payment);
+                                                        setShowReceiptModal(true);
+                                                    }}
+                                                    style={{ 
+                                                        padding: '0.4rem 0.75rem', 
+                                                        color: 'var(--primary)', 
+                                                        backgroundColor: '#f8fafc',
+                                                        border: '1px solid #cbd5e1',
+                                                        borderRadius: 'var(--radius-sm)',
+                                                        display: 'inline-flex',
+                                                        alignItems: 'center',
+                                                        gap: '0.35rem',
+                                                        fontSize: '0.8rem',
+                                                        fontWeight: '700',
+                                                        cursor: 'pointer',
+                                                        boxShadow: '0 1px 2px rgba(0,0,0,0.05)'
+                                                    }}
+                                                    title="Ver e Imprimir Recibo Oficial de Pago (PDF)"
+                                                >
+                                                    <Printer size={13} color="#d97706" /> Recibo PDF
+                                                </button>
+
+                                                {/* Botón Ver Documento Adjunto (Comprobante / Transferencia / Cheque) */}
+                                                {(payment.attachedDocs?.length > 0 || (payment.comprobante && payment.comprobante.startsWith('data:image'))) && (
+                                                    <button
+                                                        className="btn"
+                                                        onClick={() => {
+                                                            const docsList = (payment.attachedDocs && payment.attachedDocs.length > 0) ? payment.attachedDocs : [{
+                                                                id: `doc_${payment.id}`,
+                                                                name: `Comprobante_${payment.id}`,
+                                                                type: payment.comprobante?.startsWith('data:image') ? 'image/jpeg' : 'application/pdf',
+                                                                dataUri: payment.comprobante,
+                                                                date: payment.date
+                                                            }];
+                                                            setSelectedViewingDoc(docsList);
+                                                            setShowDocViewer(true);
+                                                        }}
+                                                        style={{
+                                                            padding: '0.4rem 0.65rem',
+                                                            color: '#0369a1',
+                                                            backgroundColor: '#f0f9ff',
+                                                            border: '1px solid #bae6fd',
+                                                            borderRadius: 'var(--radius-sm)',
+                                                            display: 'inline-flex',
+                                                            alignItems: 'center',
+                                                            gap: '0.3rem',
+                                                            fontSize: '0.8rem',
+                                                            fontWeight: '700',
+                                                            cursor: 'pointer'
+                                                        }}
+                                                        title="Ver Documento(s) / Comprobante(s) Adjunto(s)"
+                                                    >
+                                                        <Paperclip size={13} color="#0284c7" /> Doc ({payment.attachedDocs?.length || 1})
+                                                    </button>
+                                                )}
+
+                                                {/* Botón Editar Pago (SOLO PARA SANTIAGO / ADMIN) */}
+                                                {canEditPayments && (
+                                                    <button
+                                                        className="btn"
+                                                        onClick={() => handleOpenEditModal(payment)}
+                                                        style={{
+                                                            padding: '0.4rem 0.65rem',
+                                                            color: '#1e293b',
+                                                            backgroundColor: '#f1f5f9',
+                                                            border: '1px solid #cbd5e1',
+                                                            borderRadius: 'var(--radius-sm)',
+                                                            display: 'inline-flex',
+                                                            alignItems: 'center',
+                                                            gap: '0.3rem',
+                                                            fontSize: '0.8rem',
+                                                            fontWeight: '700',
+                                                            cursor: 'pointer'
+                                                        }}
+                                                        title="Editar Pago (Solo Administrador Principal)"
+                                                    >
+                                                        <Edit3 size={13} color="#475569" /> Editar
+                                                    </button>
+                                                )}
+
+                                                {/* Botón Eliminar Pago (SOLO PARA SANTIAGO / ADMIN) */}
+                                                {canEditPayments && (
+                                                    <button
+                                                        className="btn"
+                                                        onClick={() => handleDeletePayment(payment)}
+                                                        style={{
+                                                            padding: '0.4rem 0.5rem',
+                                                            color: '#dc2626',
+                                                            backgroundColor: '#fef2f2',
+                                                            border: '1px solid #fecaca',
+                                                            borderRadius: 'var(--radius-sm)',
+                                                            display: 'inline-flex',
+                                                            alignItems: 'center',
+                                                            fontSize: '0.8rem',
+                                                            cursor: 'pointer'
+                                                        }}
+                                                        title="Eliminar Pago"
+                                                    >
+                                                        <Trash2 size={13} />
+                                                    </button>
+                                                )}
+                                            </div>
                                         </td>
                                     </tr>
                                 );
@@ -1254,6 +1706,53 @@ const PaymentManagement = ({ policies = [], payments = [], setPayments, clients 
                                     </div>
                                 </div>
 
+                                <div style={{ marginBottom: '1rem', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                                    <div>
+                                        <label>No. de Referencia / Voucher / Cheque</label>
+                                        <input type="text" placeholder="Ej. TRF-83921 o Chq #102"
+                                            value={newPayment.reference}
+                                            onChange={e => setNewPayment({ ...newPayment, reference: e.target.value })} />
+                                    </div>
+                                    <div>
+                                        <label>Notas / Observaciones</label>
+                                        <input type="text" placeholder="Observaciones opcionales..."
+                                            value={newPayment.notes}
+                                            onChange={e => setNewPayment({ ...newPayment, notes: e.target.value })} />
+                                    </div>
+                                </div>
+
+                                {/* Adjuntar Documento o Comprobante (Opcional - Múltiples) */}
+                                <div style={{ marginBottom: '1.25rem' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: '700', fontSize: '0.85rem', color: '#1e293b', marginBottom: '0.35rem' }}>
+                                        <Paperclip size={15} color="#0284c7" /> Adjuntar Comprobantes o Documentos de Pago (Opcional - Múltiples)
+                                    </label>
+                                    <input
+                                        type="file"
+                                        multiple
+                                        accept="image/*,.pdf"
+                                        onChange={handleSingleFileChange}
+                                        style={{ width: '100%', padding: '0.55rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1.5px dashed var(--border)', backgroundColor: '#f8fafc', fontSize: '0.84rem' }}
+                                    />
+                                    {singleAttachedDocs.length > 0 && (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', marginTop: '0.45rem' }}>
+                                            {singleAttachedDocs.map((doc) => (
+                                                <div key={doc.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.45rem 0.75rem', backgroundColor: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 'var(--radius-sm)', fontSize: '0.82rem' }}>
+                                                    <span style={{ color: '#166534', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '0.35rem', minWidth: 0 }}>
+                                                        <CheckCircle size={15} color="#16a34a" style={{ flexShrink: 0 }} />
+                                                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                            {doc.name}
+                                                        </span>
+                                                        <span style={{ fontSize: '0.75rem', color: '#15803d', flexShrink: 0 }}>({doc.size})</span>
+                                                    </span>
+                                                    <button type="button" onClick={() => handleRemoveSingleDoc(doc.id)} style={{ background: 'none', border: 'none', color: '#dc2626', cursor: 'pointer', fontWeight: '700', fontSize: '0.78rem', padding: '2px 6px', flexShrink: 0 }}>
+                                                        ✕ Quitar
+                                                    </button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+
                                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', marginTop: '1.5rem' }}>
                                     <button type="button" className="btn" onClick={() => setShowModal(false)} style={{ backgroundColor: '#f1f5f9' }}>
                                         Cancelar
@@ -1311,7 +1810,7 @@ const PaymentManagement = ({ policies = [], payments = [], setPayments, clients 
                                         </div>
                                     </div>
 
-                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.75rem' }}>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
                                         <div>
                                             <label>Fecha de Cobro</label>
                                             <input 
@@ -1343,6 +1842,38 @@ const PaymentManagement = ({ policies = [], payments = [], setPayments, clients 
                                                 onChange={e => setMultiPaymentForm({ ...multiPaymentForm, reference: e.target.value })} 
                                             />
                                         </div>
+                                    </div>
+
+                                    {/* Adjuntar Documento o Comprobante para Pago Múltiple (Opcional - Múltiples) */}
+                                    <div>
+                                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontWeight: '700', fontSize: '0.82rem', color: '#1e293b', marginBottom: '0.35rem' }}>
+                                            <Paperclip size={14} color="#0284c7" /> Adjuntar Comprobantes Globales de Pago / Transferencias (Opcional - Múltiples)
+                                        </label>
+                                        <input
+                                            type="file"
+                                            multiple
+                                            accept="image/*,.pdf"
+                                            onChange={handleMultiFileChange}
+                                            style={{ width: '100%', padding: '0.5rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1.5px dashed var(--border)', backgroundColor: '#ffffff', fontSize: '0.82rem' }}
+                                        />
+                                        {multiAttachedDocs.length > 0 && (
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', marginTop: '0.45rem' }}>
+                                                {multiAttachedDocs.map((doc) => (
+                                                    <div key={doc.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.45rem 0.75rem', backgroundColor: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 'var(--radius-sm)', fontSize: '0.8rem' }}>
+                                                        <span style={{ color: '#166534', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '0.35rem', minWidth: 0 }}>
+                                                            <CheckCircle size={14} color="#16a34a" style={{ flexShrink: 0 }} />
+                                                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                                {doc.name}
+                                                            </span>
+                                                            <span style={{ fontSize: '0.75rem', color: '#15803d', flexShrink: 0 }}>({doc.size})</span>
+                                                        </span>
+                                                        <button type="button" onClick={() => handleRemoveMultiDoc(doc.id)} style={{ background: 'none', border: 'none', color: '#dc2626', cursor: 'pointer', fontWeight: '700', fontSize: '0.78rem', padding: '2px 6px', flexShrink: 0 }}>
+                                                            ✕ Quitar
+                                                        </button>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
 
@@ -1820,6 +2351,292 @@ const PaymentManagement = ({ policies = [], payments = [], setPayments, clients 
                     }}
                     payment={selectedReceiptPayment}
                     policy={policies.find(p => p.id === selectedReceiptPayment.policyId || selectedReceiptPayment.policy?.includes(p.id)) || {}}
+                />
+            )}
+
+            {/* Modal de Edición de Pagos (Exclusivo para Santiago Morales / Administrador) */}
+            {showEditModal && editingPayment && (
+                <div style={{
+                    position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                    backgroundColor: 'rgba(15, 23, 42, 0.65)',
+                    backdropFilter: 'blur(4px)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000,
+                    padding: '1rem',
+                    animation: 'fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1)'
+                }}>
+                    <div className="card" style={{
+                        width: '100%',
+                        maxWidth: '640px',
+                        backgroundColor: '#ffffff',
+                        maxHeight: '92vh',
+                        overflowY: 'auto',
+                        borderRadius: 'var(--radius-lg)',
+                        boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+                        border: '1px solid var(--border)',
+                        padding: '1.75rem'
+                    }}>
+                        {/* Header */}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.25rem', borderBottom: '1px solid #e2e8f0', paddingBottom: '0.85rem' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                                <div style={{
+                                    width: '40px', height: '40px', borderRadius: '10px',
+                                    backgroundColor: '#eff6ff', color: 'var(--primary)',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    border: '1px solid #bfdbfe'
+                                }}>
+                                    <Edit3 size={20} />
+                                </div>
+                                <div>
+                                    <h3 style={{ margin: 0, fontSize: '1.2rem', color: 'var(--primary)', fontWeight: '800' }}>
+                                        Editar Registro de Pago
+                                    </h3>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.2rem' }}>
+                                        <span style={{ fontSize: '0.75rem', fontWeight: '800', padding: '0.12rem 0.45rem', borderRadius: '4px', backgroundColor: '#fef3c7', color: '#92400e', border: '1px solid #fde68a', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                                            <ShieldCheck size={12} /> {currentUser?.name?.split(' ')[0] || 'Administrador'}
+                                        </span>
+                                        <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                                            Recibo #{editingPayment.id}
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => { setShowEditModal(false); setEditingPayment(null); }}
+                                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '4px' }}
+                            >
+                                <XCircle size={22} />
+                            </button>
+                        </div>
+
+                        {/* Info Banner */}
+                        <div style={{
+                            padding: '0.75rem 1rem',
+                            backgroundColor: '#f8fafc',
+                            border: '1px solid #e2e8f0',
+                            borderRadius: 'var(--radius-sm)',
+                            marginBottom: '1.25rem',
+                            fontSize: '0.85rem',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '0.35rem'
+                        }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                <span style={{ color: 'var(--text-muted)' }}>Cliente:</span>
+                                <strong style={{ color: 'var(--text-main)' }}>{editingPayment.client}</strong>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                <span style={{ color: 'var(--text-muted)' }}>Póliza:</span>
+                                <strong style={{ color: 'var(--primary)' }}>{editingPayment.policyId || editingPayment.policy}</strong>
+                            </div>
+                        </div>
+
+                        {/* Form */}
+                        <form onSubmit={handleSaveEditedPayment}>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                                <div>
+                                    <label style={{ fontWeight: '700', fontSize: '0.85rem' }}>Monto Pagado *</label>
+                                    <input
+                                        type="number"
+                                        step="any"
+                                        required
+                                        value={editFormData.amount}
+                                        onChange={e => setEditFormData({ ...editFormData, amount: e.target.value })}
+                                        style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '2px solid var(--primary)', fontWeight: '700', fontSize: '1rem' }}
+                                    />
+                                </div>
+                                <div>
+                                    <label style={{ fontWeight: '700', fontSize: '0.85rem' }}>Fecha del Pago *</label>
+                                    <input
+                                        type="date"
+                                        required
+                                        value={editFormData.date}
+                                        onChange={e => setEditFormData({ ...editFormData, date: e.target.value })}
+                                        style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}
+                                    />
+                                </div>
+                            </div>
+
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                                <div>
+                                    <label style={{ fontWeight: '700', fontSize: '0.85rem' }}>Método de Pago</label>
+                                    <select
+                                        value={editFormData.paymentMethod}
+                                        onChange={e => setEditFormData({ ...editFormData, paymentMethod: e.target.value })}
+                                        style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}
+                                    >
+                                        <option value="Efectivo">💵 Efectivo (Recibo de Caja)</option>
+                                        <option value="Transferencia">🏦 Transferencia Bancaria</option>
+                                        <option value="Tarjeta">💳 Tarjeta de Crédito / Débito</option>
+                                        <option value="Cheque">📑 Cheque</option>
+                                        <option value="Depósito">🏛️ Depósito Bancario</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label style={{ fontWeight: '700', fontSize: '0.85rem' }}>Estado</label>
+                                    <select
+                                        value={editFormData.status}
+                                        onChange={e => setEditFormData({ ...editFormData, status: e.target.value })}
+                                        style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', fontWeight: '700' }}
+                                    >
+                                        <option value="Paid">✅ Pagado / Aplicado</option>
+                                        <option value="Pending">⏳ Pendiente</option>
+                                        <option value="Overdue">⚠️ Vencido</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div style={{ marginBottom: '1rem' }}>
+                                <label style={{ fontWeight: '700', fontSize: '0.85rem' }}>Concepto</label>
+                                <select
+                                    value={editFormData.type}
+                                    onChange={e => setEditFormData({ ...editFormData, type: e.target.value })}
+                                    style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}
+                                >
+                                    <option value="Cuota Mensual">Cuota Mensual</option>
+                                    <option value="Renovación">Renovación</option>
+                                    <option value="Anual">Anual</option>
+                                    <option value="Semestral">Semestral</option>
+                                    <option value="Inicial">Inicial</option>
+                                    <option value="Otro">Otro</option>
+                                </select>
+                                {editFormData.type === 'Otro' && (
+                                    <input
+                                        type="text"
+                                        placeholder="Especificar concepto personalizado"
+                                        value={editFormData.customType}
+                                        onChange={e => setEditFormData({ ...editFormData, customType: e.target.value })}
+                                        style={{ marginTop: '0.5rem', width: '100%', padding: '0.55rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}
+                                    />
+                                )}
+                            </div>
+
+                            <div style={{ marginBottom: '1rem' }}>
+                                <label style={{ fontWeight: '700', fontSize: '0.85rem' }}>No. de Referencia / Voucher / Cheque</label>
+                                <input
+                                    type="text"
+                                    placeholder="Ej. TRF-99214 o Cheque #501"
+                                    value={editFormData.reference}
+                                    onChange={e => setEditFormData({ ...editFormData, reference: e.target.value })}
+                                    style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}
+                                />
+                            </div>
+
+                            <div style={{ marginBottom: '1rem' }}>
+                                <label style={{ fontWeight: '700', fontSize: '0.85rem' }}>Notas / Observaciones</label>
+                                <input
+                                    type="text"
+                                    placeholder="Detalles u observaciones del cobro..."
+                                    value={editFormData.notes}
+                                    onChange={e => setEditFormData({ ...editFormData, notes: e.target.value })}
+                                    style={{ width: '100%', padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}
+                                />
+                            </div>
+
+                            {/* Gestión de Documentos y Comprobantes Adjuntos (Opcional) */}
+                            <div style={{
+                                padding: '1rem',
+                                backgroundColor: '#f8fafc',
+                                border: '1.5px dashed #cbd5e1',
+                                borderRadius: 'var(--radius-sm)',
+                                marginBottom: '1.5rem'
+                            }}>
+                                <label style={{ fontWeight: '700', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#1e293b', marginBottom: '0.5rem' }}>
+                                    <Paperclip size={16} color="#0284c7" /> Documentos y Evidencias de Pago Adjuntas (Opcional)
+                                </label>
+
+                                {editAttachedDocs.length > 0 && (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginBottom: '0.75rem' }}>
+                                        {editAttachedDocs.map((doc, idx) => (
+                                            <div key={doc.id || idx} style={{
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'space-between',
+                                                padding: '0.5rem 0.75rem',
+                                                backgroundColor: '#ffffff',
+                                                border: '1px solid #e2e8f0',
+                                                borderRadius: 'var(--radius-sm)',
+                                                fontSize: '0.82rem'
+                                            }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', minWidth: 0 }}>
+                                                    <FileText size={15} color="#2563eb" />
+                                                    <span style={{ fontWeight: '600', color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                        {doc.name}
+                                                    </span>
+                                                    {doc.size && <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>({doc.size})</span>}
+                                                </div>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                                    {doc.dataUri && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => {
+                                                                setSelectedViewingDoc(doc);
+                                                                setShowDocViewer(true);
+                                                            }}
+                                                            style={{ background: 'none', border: 'none', color: '#2563eb', cursor: 'pointer', fontWeight: '700', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '0.2rem' }}
+                                                        >
+                                                            <Eye size={13} /> Ver
+                                                        </button>
+                                                    )}
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleRemoveEditAttachedDoc(doc.id)}
+                                                        style={{ background: 'none', border: 'none', color: '#dc2626', cursor: 'pointer', fontWeight: '700', fontSize: '0.78rem' }}
+                                                    >
+                                                        ✕ Quitar
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                    <input
+                                        type="file"
+                                        multiple
+                                        accept="image/*,.pdf"
+                                        onChange={handleEditFileChange}
+                                        style={{ width: '100%', padding: '0.45rem 0.65rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', backgroundColor: '#ffffff', fontSize: '0.82rem' }}
+                                    />
+                                </div>
+                            </div>
+
+                            {/* Modal Actions */}
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', borderTop: '1px solid var(--border)', paddingTop: '1rem' }}>
+                                <button
+                                    type="button"
+                                    className="btn"
+                                    onClick={() => { setShowEditModal(false); setEditingPayment(null); }}
+                                    disabled={isSavingEdit}
+                                    style={{ backgroundColor: '#f1f5f9' }}
+                                >
+                                    Cancelar
+                                </button>
+                                <button
+                                    type="submit"
+                                    className="btn btn-primary"
+                                    disabled={isSavingEdit}
+                                    style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: '700' }}
+                                >
+                                    {isSavingEdit ? <RefreshCw size={16} className="animate-spin" /> : <Check size={16} />}
+                                    {isSavingEdit ? 'Guardando Cambios...' : 'Guardar Cambios'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* Visor de Documentos y Evidencias Adjuntas */}
+            {showDocViewer && selectedViewingDoc && (
+                <DocumentViewerModal
+                    isOpen={showDocViewer}
+                    onClose={() => {
+                        setShowDocViewer(false);
+                        setSelectedViewingDoc(null);
+                    }}
+                    document={selectedViewingDoc}
                 />
             )}
         </div>

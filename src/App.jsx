@@ -12,15 +12,22 @@ import ClaimsManagement from './components/ClaimsManagement';
 import CompaniesManagement from './components/CompaniesManagement';
 import RequestsManagement from './components/RequestsManagement';
 import Settings from './components/Settings';
+import LoginPage from './components/LoginPage';
 import { Loader2 } from 'lucide-react';
 
 function AppContent() {
-  const { currentUser, isDemo } = useUser();
+  const { currentUser, isDemo, isAuthenticated } = useUser();
   const [currentPage, setCurrentPage] = useState('dashboard');
   const [isLoadingData, setIsLoadingData] = useState(true);
 
-  /* Shared state for policies to reflect movements in Dashboard */
+  // If not authenticated, display the Login Page
+  if (!isAuthenticated) {
+    return <LoginPage />;
+  }
+
+  /* Shared state for policies and clients to reflect movements in Dashboard & Header */
   const [selectedPolicyId, setSelectedPolicyId] = useState(null);
+  const [selectedClientId, setSelectedClientId] = useState(null);
   const [shouldOpenCreateModal, setShouldOpenCreateModal] = useState(false);
   const [shouldOpenPaymentModal, setShouldOpenPaymentModal] = useState(false);
 
@@ -92,7 +99,14 @@ function AppContent() {
 
   const navigateToPolicy = (id) => {
     setSelectedPolicyId(id);
+    setSelectedClientId(null);
     setCurrentPage('policies');
+  };
+
+  const navigateToClient = (id) => {
+    setSelectedClientId(id);
+    setSelectedPolicyId(null);
+    setCurrentPage('clients');
   };
 
   const navigateToCreatePolicy = () => {
@@ -128,11 +142,19 @@ function AppContent() {
       case 'dashboard':
         return <Dashboard
           policies={policies}
+          setPolicies={setPolicies}
           clients={clients}
+          setClients={setClients}
           claims={claims}
+          setClaims={setClaims}
           payments={payments}
+          setPayments={setPayments}
           requests={requests}
+          setRequests={setRequests}
+          companies={companies}
+          agentCodes={agentCodes}
           onNavigateToPolicy={navigateToPolicy}
+          onNavigateToClient={navigateToClient}
           onNavigate={setCurrentPage}
           onNavigateToCreatePolicy={navigateToCreatePolicy}
           onNavigateToPaymentCreation={navigateToPaymentCreation}
@@ -145,6 +167,8 @@ function AppContent() {
           payments={payments} 
           claims={claims} 
           agentCodes={agentCodes}
+          initialSelectedClientId={selectedClientId}
+          onClearSelection={() => setSelectedClientId(null)}
           onNavigateToPolicy={navigateToPolicy}
           onNavigateToClaim={(claimId) => setCurrentPage('claims')}
         />;
@@ -155,6 +179,7 @@ function AppContent() {
           clients={clients}
           setClients={setClients}
           payments={payments}
+          setPayments={setPayments}
           claims={claims}
           agentCodes={agentCodes}
           companies={companies}
@@ -177,6 +202,7 @@ function AppContent() {
       case 'payments':
         return <PaymentManagement
           policies={policies}
+          setPolicies={setPolicies}
           payments={payments}
           setPayments={setPayments}
           clients={clients}
@@ -237,7 +263,10 @@ function AppContent() {
       clients={clients}
       policies={policies}
       requests={requests}
+      claims={claims}
+      payments={payments}
       onNavigateToPolicy={navigateToPolicy}
+      onNavigateToClient={navigateToClient}
     >
       {renderPage()}
     </Layout>

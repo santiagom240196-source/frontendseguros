@@ -164,7 +164,7 @@ th {
   background-color: #f1f5f9;
   font-weight: 700;
   color: var(--primary);
-  font-size: var(--text-sm); /* Slightly smaller for headers is ok if contrast matches */
+  font-size: var(--text-sm);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -173,9 +173,15 @@ tr:hover td {
   background-color: #f8fafc;
 }
 
+/* Responsive Table Wrapper */
+.table-responsive {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 /* Sidebar Scrollbar Logic */
 .sidebar-scroll {
-  /* Firefox */
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;
 }
@@ -184,7 +190,6 @@ tr:hover td {
   scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
 }
 
-/* Webkit (Chrome, Safari, Edge) */
 .sidebar-scroll::-webkit-scrollbar {
   width: 6px;
 }
@@ -201,3 +206,105 @@ tr:hover td {
 .sidebar-scroll:hover::-webkit-scrollbar-thumb {
   background-color: rgba(255, 255, 255, 0.3);
 }
+
+/* Animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.animate-spin-slow {
+  animation: spin 8s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   RESPONSIVE DESIGN BREAKPOINTS (Mobile, Tablet, Desktop)
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* Tablets & Small Laptops (max-width: 1024px) */
+@media (max-width: 1024px) {
+  :root {
+    --text-base: 1.05rem;
+    --text-xl: 1.35rem;
+    --text-2xl: 1.75rem;
+    --text-3xl: 2.25rem;
+  }
+
+  .container {
+    padding: 0 1rem;
+  }
+}
+
+/* Mobile Devices & Tablets (max-width: 768px) */
+@media (max-width: 768px) {
+  :root {
+    --text-xs: 0.78rem;
+    --text-sm: 0.88rem;
+    --text-base: 0.95rem;
+    --text-lg: 1.1rem;
+    --text-xl: 1.25rem;
+    --text-2xl: 1.5rem;
+    --text-3xl: 1.85rem;
+    --radius-lg: 0.75rem;
+  }
+
+  body {
+    font-size: var(--text-base);
+  }
+
+  h1 { font-size: var(--text-2xl); }
+  h2 { font-size: var(--text-xl); }
+  h3 { font-size: var(--text-lg); }
+
+  .container {
+    padding: 0 0.5rem;
+  }
+
+  .card {
+    padding: 1.15rem !important;
+    border-radius: var(--radius-md) !important;
+  }
+
+  .btn {
+    padding: 0.6rem 1rem !important;
+    font-size: 0.9rem !important;
+  }
+
+  input, select, textarea {
+    padding: 0.65rem 0.75rem !important;
+    font-size: 0.92rem !important;
+  }
+
+  th, td {
+    padding: 0.75rem 0.65rem !important;
+    font-size: 0.85rem !important;
+  }
+}
+
+/* Small Phones (max-width: 480px) */
+@media (max-width: 480px) {
+  :root {
+    --text-base: 0.9rem;
+    --text-2xl: 1.35rem;
+  }
+
+  .card {
+    padding: 0.9rem !important;
+  }
+
+  .btn {
+    width: 100%;
+  }
+}
+

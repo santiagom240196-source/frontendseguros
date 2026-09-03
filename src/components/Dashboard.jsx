@@ -1,7 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Users, FileText, AlertCircle, PlusCircle, Search, DollarSign, PieChart, AlertTriangle, ShieldAlert, Shield, ArrowRight, FileCheck, RefreshCw } from 'lucide-react';
 import { formatDateToDDMMYYYY, isOpenClaim } from '../utils/policyHelpers';
 import DashboardAlertsAndReminders from './DashboardAlertsAndReminders';
+import QuickPolicyModal from './QuickPolicyModal';
+import QuickPaymentModal from './QuickPaymentModal';
+import QuickMovementModal from './QuickMovementModal';
+import QuickClaimModal from './QuickClaimModal';
+import QuickCommissionModal from './QuickCommissionModal';
 
 const StatCard = ({ title, value, icon: Icon, color, onClick }) => (
     <div
@@ -33,8 +38,64 @@ const StatCard = ({ title, value, icon: Icon, color, onClick }) => (
     </div>
 );
 
-const QuickIconButton = ({ label, icon: Icon, onClick, color = 'var(--primary)', bgHover }) => {
+const QuickIconButton = ({ label, shortLabel, icon: Icon, onClick, color = 'var(--primary)', isMobile }) => {
     const [isHovered, setIsHovered] = useState(false);
+
+    if (isMobile) {
+        return (
+            <button
+                type="button"
+                onClick={onClick}
+                style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    padding: '0.35rem 0.2rem',
+                    borderRadius: 'var(--radius-md)',
+                    color: color,
+                    flex: 1,
+                    minWidth: 0,
+                    transition: 'transform 0.15s ease',
+                    outline: 'none',
+                    WebkitTapHighlightColor: 'transparent'
+                }}
+                onTouchStart={e => e.currentTarget.style.transform = 'scale(0.92)'}
+                onTouchEnd={e => e.currentTarget.style.transform = 'scale(1)'}
+            >
+                <div style={{
+                    width: '38px',
+                    height: '38px',
+                    borderRadius: '50%',
+                    backgroundColor: `${color}15`,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: color,
+                    marginBottom: '0.2rem',
+                    boxShadow: `0 2px 6px ${color}20`
+                }}>
+                    <Icon size={19} strokeWidth={2.4} />
+                </div>
+                <span style={{
+                    fontSize: '0.66rem',
+                    fontWeight: '700',
+                    color: 'var(--text-main)',
+                    textAlign: 'center',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    maxWidth: '100%',
+                    letterSpacing: '-0.01em'
+                }}>
+                    {shortLabel || label}
+                </span>
+            </button>
+        );
+    }
 
     return (
         <div style={{ position: 'relative', display: 'inline-flex', flexDirection: 'column', alignItems: 'center' }}>
@@ -47,8 +108,8 @@ const QuickIconButton = ({ label, icon: Icon, onClick, color = 'var(--primary)',
                     display: 'inline-flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    width: '52px',
-                    height: '52px',
+                    width: 'clamp(44px, 10vw, 52px)',
+                    height: 'clamp(44px, 10vw, 52px)',
                     borderRadius: '50%',
                     backgroundColor: isHovered ? color : `${color}14`,
                     color: isHovered ? '#ffffff' : color,
@@ -57,15 +118,16 @@ const QuickIconButton = ({ label, icon: Icon, onClick, color = 'var(--primary)',
                     boxShadow: isHovered ? `0 8px 20px -2px ${color}45` : '0 2px 6px rgba(0,0,0,0.04)',
                     transform: isHovered ? 'translateY(-3px) scale(1.08)' : 'translateY(0) scale(1)',
                     transition: 'all 0.22s cubic-bezier(0.4, 0, 0.2, 1)',
-                    outline: 'none'
+                    outline: 'none',
+                    flexShrink: 0
                 }}
             >
-                <Icon size={24} strokeWidth={2.4} />
+                <Icon size={22} strokeWidth={2.4} />
             </button>
             {/* Tooltip / Micro-etiqueta sutil */}
             <span style={{
                 position: 'absolute',
-                top: '58px',
+                top: '56px',
                 backgroundColor: 'var(--text-main)',
                 color: '#ffffff',
                 fontSize: '0.74rem',
@@ -88,15 +150,41 @@ const QuickIconButton = ({ label, icon: Icon, onClick, color = 'var(--primary)',
 
 const Dashboard = ({ 
     policies = [], 
+    setPolicies,
     clients = [], 
+    setClients,
     claims = [], 
+    setClaims,
     payments = [], 
+    setPayments,
     requests = [],
+    setRequests,
+    companies = [],
+    agentCodes = [],
     onNavigateToPolicy, 
     onNavigate, 
     onNavigateToCreatePolicy, 
     onNavigateToPaymentCreation 
 }) => {
+    // Mobile viewport state for bottom docked action bar
+    const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' ? window.innerWidth < 768 : false);
+
+    useEffect(() => {
+        const handleResize = () => {
+            setIsMobile(window.innerWidth < 768);
+        };
+        window.addEventListener('resize', handleResize);
+        return () => window.removeEventListener('resize', handleResize);
+    }, []);
+
+    // Quick Action Modals States
+    const [isPolicyModalOpen, setIsPolicyModalOpen] = useState(false);
+    const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
+    const [isMovementModalOpen, setIsMovementModalOpen] = useState(false);
+    const [isClaimModalOpen, setIsClaimModalOpen] = useState(false);
+    const [isCommissionModalOpen, setIsCommissionModalOpen] = useState(false);
+    const [selectedMovementPolicyId, setSelectedMovementPolicyId] = useState(null);
+
     // Dynamic real stats from database
     const totalClientsCount = clients.length.toLocaleString('es-DO');
     const totalPoliciesCount = policies.length.toLocaleString('es-DO');
@@ -135,7 +223,12 @@ const Dashboard = ({
     .slice(0, 6);
 
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+        <div style={{ 
+            display: 'flex', 
+            flexDirection: 'column', 
+            gap: '2rem',
+            paddingBottom: isMobile ? '85px' : '0px'
+        }}>
             <div>
                 <h2 style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>Buenos días, Sr. Morales</h2>
                 <p style={{ fontSize: '1.25rem', color: 'var(--text-muted)' }}>Aquí está el resumen de hoy, {new Date().toLocaleDateString('es-DO', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
@@ -172,58 +265,82 @@ const Dashboard = ({
                 />
             </div>
 
-            {/* Barra Estética de Acciones Rápidas con Iconos */}
-            <div style={{
+            {/* Barra Estética de Acciones Rápidas (Desktop: Pill centrada | Mobile: Dock inferior fijo) */}
+            <div style={isMobile ? {
+                position: 'fixed',
+                bottom: '10px',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                width: 'calc(100% - 18px)',
+                maxWidth: '480px',
+                zIndex: 1050,
+                backgroundColor: 'rgba(255, 255, 255, 0.96)',
+                backdropFilter: 'blur(16px)',
+                borderRadius: '20px',
+                boxShadow: '0 10px 30px rgba(60, 42, 33, 0.22), 0 2px 8px rgba(0,0,0,0.08)',
+                border: '1.5px solid var(--border)',
+                padding: '0.4rem 0.5rem',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-around',
+                animation: 'fadeIn 0.25s ease'
+            } : {
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                gap: '2.25rem',
+                gap: 'clamp(0.75rem, 3.5vw, 2.25rem)',
                 flexWrap: 'wrap',
-                padding: '0.85rem 2.5rem',
+                padding: 'clamp(0.6rem, 2vw, 0.85rem) clamp(0.85rem, 3vw, 2.5rem)',
                 backgroundColor: '#ffffff',
                 borderRadius: 'var(--radius-full)',
                 border: '1px solid var(--border)',
                 boxShadow: '0 4px 16px -2px rgba(60, 42, 33, 0.06)',
-                width: 'fit-content',
+                width: 'min(100%, fit-content)',
+                maxWidth: '100%',
                 margin: '-0.5rem auto 0 auto'
             }}>
                 <QuickIconButton
                     label="Nueva Póliza"
+                    shortLabel="Póliza"
                     icon={PlusCircle}
-                    onClick={() => onNavigateToCreatePolicy && onNavigateToCreatePolicy()}
+                    onClick={() => setIsPolicyModalOpen(true)}
                     color="var(--primary)"
-                    bgHover="#fdf8f4"
+                    isMobile={isMobile}
                 />
                 <QuickIconButton
                     label="Registrar Pago"
+                    shortLabel="Pago"
                     icon={DollarSign}
-                    onClick={() => onNavigateToPaymentCreation && onNavigateToPaymentCreation()}
+                    onClick={() => setIsPaymentModalOpen(true)}
                     color="#16a34a"
-                    bgHover="#f0fdf4"
+                    isMobile={isMobile}
                 />
                 <QuickIconButton
-                    label="Registrar Movimiento"
+                    label="Cambios en Póliza"
+                    shortLabel="Movimiento"
                     icon={RefreshCw}
                     onClick={() => {
-                        alert('Por favor, selecciona una póliza de la lista para registrarle un movimiento.');
-                        onNavigate('policies');
+                        setSelectedMovementPolicyId(null);
+                        setIsMovementModalOpen(true);
                     }}
                     color="#2563eb"
-                    bgHover="#eff6ff"
+                    isMobile={isMobile}
                 />
                 <QuickIconButton
                     label="Gestionar Siniestros"
+                    shortLabel="Siniestro"
                     icon={AlertTriangle}
-                    onClick={() => onNavigate('claims')}
+                    onClick={() => setIsClaimModalOpen(true)}
                     color="#dc2626"
-                    bgHover="#fef2f2"
+                    isMobile={isMobile}
                 />
                 <QuickIconButton
                     label="Reporte Comisiones"
+                    shortLabel="Comisión"
                     icon={PieChart}
-                    onClick={() => onNavigate('commissions')}
+                    onClick={() => setIsCommissionModalOpen(true)}
                     color="#9333ea"
-                    bgHover="#faf5ff"
+                    isMobile={isMobile}
                 />
             </div>
 
@@ -374,6 +491,66 @@ const Dashboard = ({
                     )}
                 </ul>
             </div>
+
+            {/* Modal Intuitivo: Nueva Póliza */}
+            <QuickPolicyModal
+                isOpen={isPolicyModalOpen}
+                onClose={() => setIsPolicyModalOpen(false)}
+                policies={policies}
+                setPolicies={setPolicies}
+                clients={clients}
+                setClients={setClients}
+                companies={companies}
+                agentCodes={agentCodes}
+                onNavigateToPolicy={onNavigateToPolicy}
+            />
+
+            {/* Modal Intuitivo: Registrar Pago */}
+            <QuickPaymentModal
+                isOpen={isPaymentModalOpen}
+                onClose={() => setIsPaymentModalOpen(false)}
+                policies={policies}
+                setPolicies={setPolicies}
+                payments={payments}
+                setPayments={setPayments}
+                clients={clients}
+                onNavigateToPolicy={onNavigateToPolicy}
+            />
+
+            {/* Modal Intuitivo: Cambios y Movimientos en Póliza */}
+            <QuickMovementModal
+                isOpen={isMovementModalOpen}
+                onClose={() => {
+                    setIsMovementModalOpen(false);
+                    setSelectedMovementPolicyId(null);
+                }}
+                policies={policies}
+                setPolicies={setPolicies}
+                requests={requests}
+                setRequests={setRequests}
+                onNavigateToPolicy={onNavigateToPolicy}
+                preselectedPolicyId={selectedMovementPolicyId}
+            />
+
+            {/* Modal Intuitivo: Gestión y Reporte de Siniestros */}
+            <QuickClaimModal
+                isOpen={isClaimModalOpen}
+                onClose={() => setIsClaimModalOpen(false)}
+                policies={policies}
+                claims={claims}
+                setClaims={setClaims}
+                onNavigate={onNavigate}
+            />
+
+            {/* Modal Intuitivo: Resumen de Comisiones */}
+            <QuickCommissionModal
+                isOpen={isCommissionModalOpen}
+                onClose={() => setIsCommissionModalOpen(false)}
+                payments={payments}
+                policies={policies}
+                agentCodes={agentCodes}
+                onNavigate={onNavigate}
+            />
         </div>
     );
 };

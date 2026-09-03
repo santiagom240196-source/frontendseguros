@@ -300,22 +300,22 @@ export const parseExcelFile = async (file) => {
                 });
 
                 // Detección de Cobros/Pagos incluidos en el Excel
-                const paymentAmount = normalizeExcelNumber(mappedRow.monto_cobro || mappedRow.pago || mappedRow.monto_pagado || premium);
-                const paymentDate = normalizeExcelDate(mappedRow.fecha_pago || mappedRow.fecha_cobro || startDate) || startDate;
-                const paymentStatus = String(mappedRow.estado_pago || mappedRow.estado_cobro || 'Paid').toLowerCase().includes('pag') ? 'Paid' : 'Pending';
-
-                if (paymentAmount > 0) {
+                // Solo registrar cuando el archivo contenga explícitamente un pago realizado
+                const explicitPaidAmount = normalizeExcelNumber(mappedRow.monto_pagado || mappedRow.pago_realizado || (mappedRow.monto_cobro && String(mappedRow.estado_pago || mappedRow.estado_cobro || '').toLowerCase().includes('pag') ? mappedRow.monto_cobro : null));
+                
+                if (explicitPaidAmount > 0) {
+                  const paymentDate = normalizeExcelDate(mappedRow.fecha_pago || mappedRow.fecha_cobro || startDate) || startDate;
                   rawPayments.push({
                     receiptId: `REC-${policyNum.replace(/[^a-zA-Z0-9]/g, '')}-${idx + 1}`,
                     policyId: policyNum,
                     clientName: clientObj.name,
                     date: paymentDate,
                     dueDate: endDate,
-                    amount: paymentAmount,
-                    status: paymentStatus,
+                    amount: explicitPaidAmount,
+                    status: 'Paid',
                     type: 'Prima Inicial / Renovación',
                     paymentMethod: String(mappedRow.metodo_pago || 'Transferencia'),
-                    notes: 'Importado vía Excel',
+                    notes: 'Pago importado vía Excel',
                   });
                 }
               }
@@ -432,70 +432,7 @@ export const downloadSampleExcelTemplate = () => {
   XLSX.writeFile(wb, 'Plantilla_Importacion_Santiago_Morales.xlsx');
 };
 
-/**
- * Exporta toda la base de datos a un libro Excel consolidado
- */
-export const exportDatabaseToExcel = (clients = [], policies = [], payments = [], claims = [], companies = []) => {
-  const wb = XLSX.utils.book_new();
 
-  // Hoja Clientes
-  const clientsData = clients.map(c => ({
-    'ID': c.id,
-    'Nombre': c.name,
-    'Tipo Personería': c.personType,
-    'Cédula / RNC': c.documentId,
-    'Código Compañía': c.insurerCode,
-    'Cartera': c.cartera,
-    'Código Agente': c.agentCode,
-    'Teléfono': c.phone,
-    'Email': c.email,
-    'Ciudad': c.city,
-    'Sector': c.sector,
-    'Estado': c.status,
-  }));
-  const wsClients = XLSX.utils.json_to_sheet(clientsData);
-  XLSX.utils.book_append_sheet(wb, wsClients, 'Clientes');
-
-  // Hoja Pólizas
-  const policiesData = policies.map(p => ({
-    'Número de Póliza': p.id,
-    'Cliente': p.client,
-    'Aseguradora': p.insurer,
-    'Ramo': p.type,
-    'Cartera': p.cartera,
-    'Código Agente': p.agentCode,
-    'Fecha Inicio Original': p.startDate,
-    'Última Renovación': p.lastRenewalDate || p.startDate,
-    'Próxima Renovación (Fin)': p.endDate || p.renewal,
-    'Frecuencia Pago': p.renewalFrequency,
-    'Suma Asegurada': p.insuredAmount,
-    'Prima (Monto)': p.amount,
-    'Estado': p.status,
-    'Detalles': p.details,
-  }));
-  const wsPolicies = XLSX.utils.json_to_sheet(policiesData);
-  XLSX.utils.book_append_sheet(wb, wsPolicies, 'Pólizas');
-
-  // Hoja Cobros
-  const paymentsData = payments.map(pay => ({
-    'Recibo #': pay.id,
-    'Póliza': pay.policyLabel || pay.policyId,
-    'Cliente': pay.client,
-    'Fecha': pay.date,
-    'Fecha Vencimiento': pay.dueDate,
-    'Monto': pay.amount,
-    'Moneda': pay.currency,
-    'Estado': pay.status,
-    'Método Pago': pay.paymentMethod,
-    'Concepto': pay.type,
-    'Notas': pay.notes,
-  }));
-  const wsPayments = XLSX.utils.json_to_sheet(paymentsData);
-  XLSX.utils.book_append_sheet(wb, wsPayments, 'Cobros y Pagos');
-
-  const todayStr = new Date().toISOString().split('T')[0];
-  XLSX.writeFile(wb, `Respaldo_Base_Datos_Seguros_${todayStr}.xlsx`);
-};
 
 /**
  * Importa los datos parseados de Excel a Hasura GraphQL y PostgreSQL
@@ -826,6 +763,40 @@ export const importExcelDataToHasura = async (parsedData, isDemo = false, onProg
 
       if (res?.data?.insert_cobros_one?.id) {
         results.paymentsInserted++;
+
+        // REGLA DE NEGOCIO: Si la póliza estaba cancelada y se importa/detecta un pago, reabrirla automáticamente
+        if (polizaId && (pay.status === 'Paid' || !pay.status)) {
+          try {
+            const reopenRes = await executeGraphQL(`
+              mutation ReopenCancelledPolicyOnPayment($polId: bigint!) {
+                update_polizas(
+                  where: { id: { _eq: $polId }, status: { _in: ["Cancelada", "Cancelled"] } },
+                  _set: { status: "Active" }
+                ) {
+                  affected_rows
+                }
+              }
+            `, { polId: polizaId }, { isDemo });
+
+            if (reopenRes?.data?.update_polizas?.affected_rows > 0) {
+              await executeGraphQL(`
+                mutation InsertAutoReopenMov($obj: movimientos_poliza_insert_input!) {
+                  insert_movimientos_poliza_one(object: $obj) { id }
+                }
+              `, {
+                obj: {
+                  poliza_id: polizaId,
+                  fecha: pay.date || new Date().toISOString().split('T')[0],
+                  tipo: 'Reapertura Automática por Pago',
+                  descripcion: `Póliza reactivada automáticamente tras registrarse cobro ${pay.receiptId || ''} (${pay.amount || 0} DOP) desde actualización de base de datos.`,
+                  evidencia: 'Excel / DB Update'
+                }
+              }, { isDemo });
+            }
+          } catch (reopenErr) {
+            // Ignorar si no estaba cancelada
+          }
+        }
       }
     } catch (err) {
       console.warn(`Error insertando cobro ${pay.receiptId}:`, err);
@@ -835,3 +806,125 @@ export const importExcelDataToHasura = async (parsedData, isDemo = false, onProg
   onProgress({ stage: 'done', progress: 100, message: '¡Importación finalizada con éxito!' });
   return results;
 };
+
+/**
+ * Exporta toda la base de datos a un libro de Excel (.xlsx) estructurado y consolidado
+ */
+export const exportFullDatabaseToExcel = ({
+  clients = [],
+  policies = [],
+  payments = [],
+  claims = [],
+  companies = [],
+  agentCodes = []
+}) => {
+  const wb = XLSX.utils.book_new();
+
+  // 1. Pólizas Sheet
+  const polData = policies.map(p => ({
+    'ID Póliza': p.id || '',
+    'Cliente': p.client || '',
+    'Aseguradora': p.insurer || '',
+    'Ramo': p.type || '',
+    'Cartera': p.cartera || '',
+    'Código Agente': p.agentCode || '',
+    'Prima / Monto': p.amount || 0,
+    'Comisión (%)': p.commissionRate !== undefined && p.commissionRate !== null ? p.commissionRate : (p.porcentajeComision ?? 15.0),
+    'Moneda': p.currency || 'DOP',
+    'Frecuencia': p.renewalFrequency || 'Anual',
+    'Fecha Inicio': p.startDate || '',
+    'Última Renovación': p.lastRenewalDate || '',
+    'Vigencia / Renovación': p.endDate || p.renewal || '',
+    'Estado': p.status || 'Active',
+    'Detalles': p.details || ''
+  }));
+  const wsPol = XLSX.utils.json_to_sheet(polData);
+  XLSX.utils.book_append_sheet(wb, wsPol, 'Pólizas');
+
+  // 2. Clientes Sheet
+  const cliData = clients.map(c => ({
+    'ID': c.id || '',
+    'Nombre / Razón Social': c.name || '',
+    'Tipo Persona': c.personType || '',
+    'RNC / Cédula': c.documentId || c.cedula || c.rnc || '',
+    'Código Aseguradora': c.insurerCode || '',
+    'Teléfono': c.phone || '',
+    'Celular': c.mobile || '',
+    'Email': c.email || '',
+    'Ciudad': c.city || '',
+    'Sector': c.sector || '',
+    'Dirección': c.address || '',
+    'Notas': c.notes || ''
+  }));
+  const wsCli = XLSX.utils.json_to_sheet(cliData);
+  XLSX.utils.book_append_sheet(wb, wsCli, 'Clientes');
+
+  // 3. Cobros Sheet
+  const cobData = payments.map(pay => ({
+    'No. Recibo': pay.receiptId || pay.id || '',
+    'No. Póliza': pay.policyId || '',
+    'Cliente': pay.clientName || pay.client || '',
+    'Aseguradora': pay.insurer || '',
+    'Fecha': pay.date || '',
+    'Fecha Vencimiento': pay.dueDate || '',
+    'Monto': pay.amount || 0,
+    'Moneda': pay.currency || 'DOP',
+    'Tipo': pay.type || '',
+    'Estado': pay.status || '',
+    'Método de Pago': pay.paymentMethod || '',
+    'Notas': pay.notes || ''
+  }));
+  const wsCob = XLSX.utils.json_to_sheet(cobData);
+  XLSX.utils.book_append_sheet(wb, wsCob, 'Cobros');
+
+  // 4. Siniestros Sheet
+  const sinData = claims.map(s => ({
+    'No. Reclamación': s.claimNumber || s.id || '',
+    'No. Póliza': s.policyId || '',
+    'Cliente': s.client || '',
+    'Aseguradora': s.insurer || '',
+    'Fecha Ocurrencia': s.incidentDate || '',
+    'Fecha Notificación': s.notificationDate || '',
+    'Monto Reclamado': s.claimedAmount || 0,
+    'Monto Liquidado': s.approvedAmount || 0,
+    'Estado': s.status || '',
+    'Descripción': s.description || ''
+  }));
+  const wsSin = XLSX.utils.json_to_sheet(sinData);
+  XLSX.utils.book_append_sheet(wb, wsSin, 'Siniestros');
+
+  // 5. Aseguradoras Sheet
+  const compData = companies.map(comp => ({
+    'Aseguradora': comp.name || '',
+    'RNC': comp.rnc || '',
+    'Teléfono': comp.phone || '',
+    'Email': comp.email || '',
+    'Contacto': comp.contactPerson || ''
+  }));
+  const wsComp = XLSX.utils.json_to_sheet(compData);
+  XLSX.utils.book_append_sheet(wb, wsComp, 'Aseguradoras');
+
+  // 6. Códigos de Cartera Sheet
+  const codData = agentCodes.map(ac => ({
+    'Cartera / Agente': ac.agent || '',
+    'Aseguradora': ac.insurer || '',
+    'Código': ac.code || '',
+    'Notas': ac.notes || ''
+  }));
+  const wsCod = XLSX.utils.json_to_sheet(codData);
+  XLSX.utils.book_append_sheet(wb, wsCod, 'Códigos de Cartera');
+
+  // Generate date stamp for filename
+  const now = new Date();
+  const dateStr = now.toISOString().split('T')[0];
+  const timeStr = `${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}`;
+  const filename = `Respaldo_SantiagoMorales_${dateStr}_${timeStr}.xlsx`;
+
+  XLSX.writeFile(wb, filename);
+  return filename;
+};
+
+export const exportDatabaseToExcel = exportFullDatabaseToExcel;
+
+
+

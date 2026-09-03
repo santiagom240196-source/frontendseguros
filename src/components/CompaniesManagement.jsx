@@ -1,14 +1,12 @@
 import React, { useState, useMemo } from 'react';
 import { 
-    Building2, FileText, ShieldAlert, DollarSign, Percent, Settings, X, Plus, Edit3, 
-    ArrowUpRight, CheckCircle2, Search, Phone, Mail, Globe, MapPin, UserPlus, PhoneCall, 
-    Copy, Check, ExternalLink, MessageSquare, Shield, Tag, FileSpreadsheet, KeyRound, 
-    Clock, Trash2, Edit2, ChevronRight, User, Users, Briefcase, Info, AlertCircle, Sparkles
+    Building, Phone, Mail, MapPin, Globe, Shield, Users, 
+    Plus, Search, Edit2, Trash2, ExternalLink, UserPlus, 
+    Check, X, FileText, AlertCircle, ArrowUpRight, Copy, CheckCircle2, ChevronRight, Edit3
 } from 'lucide-react';
-import { formatMoney, formatDateToDDMMYYYY } from '../utils/policyHelpers';
-import InsurerLogo, { getInitials, getColorForInsurer } from './InsurerLogo';
+import InsurerLogo from './InsurerLogo';
+import { formatMoney } from '../utils/policyHelpers';
 import { useUser } from '../context/UserContext';
-import { updateCompaniaCommissionHasura } from '../services/hasuraService';
 
 // Datos corporativos predeterminados para las principales aseguradoras
 const DEFAULT_INSURER_DETAILS = {
@@ -288,30 +286,6 @@ const DEFAULT_INSURER_CONTACTS = {
 const CompaniesManagement = ({ policies = [], payments = [], claims = [], companies = [], setCompanies }) => {
     const { isDemo } = useUser();
 
-    // Commission Rates State
-    const [insurerRates, setInsurerRates] = useState(() => {
-        const saved = localStorage.getItem('insurer_commission_rates');
-        if (saved) return JSON.parse(saved);
-        return {
-            'Seguros Universal': 0.20,
-            'Humano Seguros': 0.15,
-            'Mapfre BHD Seguros': 0.22,
-            'La Colonial de Seguros': 0.20,
-            'Seguros Reservas': 0.18,
-            'Seguros Sura': 0.15,
-            'General de Seguros': 0.12,
-            'Dominicana de Seguros': 0.15,
-            'Patria Compañía de Seguros': 0.15,
-            'Aspirante Seguros': 0.15,
-            'Seguros Pepín': 0.10,
-            'La Monumental de Seguros': 0.15,
-            'Angloamericana de Seguros': 0.15,
-            'CoopSeguros': 0.15,
-            'Seguros Crecer': 0.15,
-            'K&M Seguros': 0.15
-        };
-    });
-
     // Insurer Contacts State (Persisted)
     const [contactsByInsurer, setContactsByInsurer] = useState(() => {
         const saved = localStorage.getItem('sm_insurer_contacts');
@@ -331,8 +305,6 @@ const CompaniesManagement = ({ policies = [], payments = [], claims = [], compan
     });
 
     const [searchTerm, setSearchTerm] = useState('');
-    const [editingInsurer, setEditingInsurer] = useState(null);
-    const [tempRate, setTempRate] = useState('');
     
     // Modal de Perfil y Detalle de Aseguradora
     const [selectedInsurerDetails, setSelectedInsurerDetails] = useState(null);
@@ -478,41 +450,7 @@ const CompaniesManagement = ({ policies = [], payments = [], claims = [], compan
         const name = deletingCompanyConfirm;
         const updated = companies.filter(c => c.name.toLowerCase() !== name.toLowerCase());
         setCompanies(updated);
-
-        const updatedRates = { ...insurerRates };
-        delete updatedRates[name];
-        setInsurerRates(updatedRates);
-        if (!isDemo) {
-            localStorage.setItem('insurer_commission_rates', JSON.stringify(updatedRates));
-        }
-
         setDeletingCompanyConfirm(null);
-    };
-
-    const handleEditRate = (insurer) => {
-        setEditingInsurer(insurer);
-        const currentRate = insurerRates[insurer] !== undefined ? insurerRates[insurer] : 0.15;
-        setTempRate(String(parseFloat((currentRate * 100).toFixed(4))));
-    };
-
-    const handleSaveRate = async (insurer) => {
-        const ratePercent = parseFloat(tempRate);
-        const val = ratePercent / 100;
-        if (!isNaN(val) && val >= 0 && val <= 1) {
-            const updated = { ...insurerRates, [insurer]: val };
-            setInsurerRates(updated);
-            if (!isDemo) {
-                localStorage.setItem('insurer_commission_rates', JSON.stringify(updated));
-                try {
-                    await updateCompaniaCommissionHasura(insurer, ratePercent, isDemo);
-                } catch (e) {
-                    console.warn('Failed to update company rate in Hasura:', e);
-                }
-            }
-            setEditingInsurer(null);
-        } else {
-            alert('Por favor introduzca un porcentaje válido entre 0% y 100%.');
-        }
     };
 
     // Manejo de Contactos
@@ -614,18 +552,21 @@ const CompaniesManagement = ({ policies = [], payments = [], claims = [], compan
                 return (pol && pol.insurer === insurer) || (c.policyDesc && c.policyDesc.includes(insurer));
             });
 
-            // Comisiones
+            // Comisiones (Calculadas individualmente por cada póliza)
             let dopCommissionsPaid = 0;
             let usdCommissionsPaid = 0;
-            const rate = insurerRates[insurer] || 0.15;
 
             payments.forEach(pay => {
                 if (pay.status !== 'Paid') return;
                 const pol = policies.find(p => p.id === pay.policyId);
                 if (pol && pol.insurer === insurer) {
                     const payAmt = pay.amountNum || parseFloat(String(pay.amount).replace(/[^0-9.]/g, '')) || 0;
-                    if (pol.currency === 'USD') usdCommissionsPaid += payAmt * rate;
-                    else dopCommissionsPaid += payAmt * rate;
+                    const polRate = (pol.commissionRate !== undefined && pol.commissionRate !== null)
+                        ? Number(pol.commissionRate) / 100
+                        : (pol.porcentajeComision !== undefined && pol.porcentajeComision !== null ? Number(pol.porcentajeComision) / 100 : 0.15);
+                    const commAmt = payAmt * polRate;
+                    if (pol.currency === 'USD') usdCommissionsPaid += commAmt;
+                    else dopCommissionsPaid += commAmt;
                 }
             });
 
@@ -638,13 +579,12 @@ const CompaniesManagement = ({ policies = [], payments = [], claims = [], compan
                 dopPremiums,
                 usdPremiums,
                 dopCommissionsPaid,
-                usdCommissionsPaid,
-                rate
+                usdCommissionsPaid
             };
         });
 
         return data;
-    }, [companies, policies, payments, claims, insurerRates, contactsByInsurer]);
+    }, [companies, policies, payments, claims, contactsByInsurer]);
 
     // Overall summary stats
     const summary = useMemo(() => {
@@ -912,49 +852,6 @@ const CompaniesManagement = ({ policies = [], payments = [], claims = [], compan
                                 >
                                     <Users size={14} /> {contactsCount} {contactsCount === 1 ? 'Contacto' : 'Contactos Clave'}
                                 </button>
-
-                                {/* Rate configuration block */}
-                                <div style={{
-                                    padding: '0.25rem 0.6rem',
-                                    backgroundColor: '#f8fafc',
-                                    borderRadius: 'var(--radius-sm)',
-                                    border: '1px solid var(--border)',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '0.35rem'
-                                }}>
-                                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: '700' }}>COMISIÓN:</span>
-                                    {isEditing ? (
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                                            <input
-                                                type="number"
-                                                min="0"
-                                                max="100"
-                                                step="any"
-                                                value={tempRate}
-                                                onChange={e => setTempRate(e.target.value)}
-                                                style={{ width: '60px', padding: '0.15rem 0.25rem', fontSize: '0.8rem', textAlign: 'right' }}
-                                                autoFocus
-                                            />
-                                            <span style={{ fontSize: '0.78rem', fontWeight: '700' }}>%</span>
-                                            <button className="btn btn-primary" onClick={() => handleSaveRate(insurer)} style={{ padding: '0.15rem 0.4rem', fontSize: '0.7rem' }}>
-                                                OK
-                                            </button>
-                                            <button className="btn" onClick={() => setEditingInsurer(null)} style={{ padding: '0.15rem 0.4rem', fontSize: '0.7rem', backgroundColor: '#e2e8f0' }}>
-                                                X
-                                            </button>
-                                        </div>
-                                    ) : (
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                                            <span style={{ fontWeight: '800', color: 'var(--primary)', fontSize: '0.85rem' }}>
-                                                {parseFloat(((stats.rate || 0.15) * 100).toFixed(2))}%
-                                            </span>
-                                            <button onClick={() => { setEditingInsurer(insurer); setTempRate(String(parseFloat(((stats.rate || 0.15) * 100).toFixed(4)))); }} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 0, display: 'flex' }} title="Editar porcentaje">
-                                                <Edit3 size={12} />
-                                            </button>
-                                        </div>
-                                    )}
-                                </div>
                             </div>
 
                             {/* Stats grids */}
@@ -1625,23 +1522,33 @@ const CompaniesManagement = ({ policies = [], payments = [], claims = [], compan
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
                                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
                                         <div style={{ padding: '1rem', backgroundColor: 'white', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)' }}>
-                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: '700' }}>TASA DE COMISIÓN</div>
-                                            <div style={{ fontSize: '1.5rem', fontWeight: '900', color: 'var(--primary)', marginTop: '0.25rem' }}>
-                                                {parseFloat(((statsByInsurer[selectedInsurerDetails]?.rate || 0.15) * 100).toFixed(2))}%
-                                            </div>
-                                        </div>
-                                        <div style={{ padding: '1rem', backgroundColor: 'white', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)' }}>
                                             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: '700' }}>PRIMAS EMITIDAS (DOP)</div>
                                             <div style={{ fontSize: '1.35rem', fontWeight: '800', color: 'var(--text-main)', marginTop: '0.25rem' }}>
                                                 {formatMoney(statsByInsurer[selectedInsurerDetails]?.dopPremiums || 0, 'DOP')}
                                             </div>
                                         </div>
                                         <div style={{ padding: '1rem', backgroundColor: 'white', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)' }}>
-                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: '700' }}>COMISIÓN COBRADA (DOP)</div>
+                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: '700' }}>COMISIONES GANADAS (DOP)</div>
                                             <div style={{ fontSize: '1.35rem', fontWeight: '900', color: '#166534', marginTop: '0.25rem' }}>
                                                 {formatMoney(statsByInsurer[selectedInsurerDetails]?.dopCommissionsPaid || 0, 'DOP')}
                                             </div>
                                         </div>
+                                        {statsByInsurer[selectedInsurerDetails]?.usdPremiums > 0 && (
+                                            <div style={{ padding: '1rem', backgroundColor: 'white', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)' }}>
+                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: '700' }}>PRIMAS EMITIDAS (USD)</div>
+                                                <div style={{ fontSize: '1.35rem', fontWeight: '800', color: '#10b981', marginTop: '0.25rem' }}>
+                                                    {formatMoney(statsByInsurer[selectedInsurerDetails]?.usdPremiums || 0, 'USD')}
+                                                </div>
+                                            </div>
+                                        )}
+                                        {statsByInsurer[selectedInsurerDetails]?.usdCommissionsPaid > 0 && (
+                                            <div style={{ padding: '1rem', backgroundColor: 'white', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)' }}>
+                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: '700' }}>COMISIONES GANADAS (USD)</div>
+                                                <div style={{ fontSize: '1.35rem', fontWeight: '900', color: '#10b981', marginTop: '0.25rem' }}>
+                                                    {formatMoney(statsByInsurer[selectedInsurerDetails]?.usdCommissionsPaid || 0, 'USD')}
+                                                </div>
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             )}

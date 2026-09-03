@@ -440,37 +440,50 @@ Código de Asegurador: ${letterData.agentCode}
                 }, isDemo);
             }
 
-            // If Approved, apply side effects to policies / movements
-            if (statusUpdate === 'Aprobada' && applyPolicyChange) {
-                if (selectedRequest.type === 'Cancelación' && selectedRequest.polizaId && setPolicies) {
-                    // Update policy status to Cancelled
-                    setPolicies(prev => prev.map(p => {
-                        if (String(p.id) === String(selectedRequest.policy) || (p.rawId && String(p.rawId) === String(selectedRequest.polizaId))) {
-                            return { ...p, status: 'Cancelled' };
-                        }
-                        return p;
-                    }));
+            // If Approved / Closed, apply side effects to policies / movements
+            if (statusUpdate === 'Aprobada') {
+                const targetPolicy = policies.find(p => 
+                    String(p.id).trim().toLowerCase() === String(selectedRequest.policy || '').trim().toLowerCase() ||
+                    (selectedRequest.polizaId && (String(p.rawId) === String(selectedRequest.polizaId) || String(p.id) === String(selectedRequest.polizaId)))
+                );
+
+                const isCancellation = selectedRequest.type === 'Cancelación' || 
+                                       selectedRequest.subtype?.toLowerCase().includes('cancel') || 
+                                       selectedRequest.type?.toLowerCase().includes('cancel');
+
+                if (isCancellation && targetPolicy) {
+                    // Update policy status to Cancelled in memory
+                    if (setPolicies) {
+                        setPolicies(prev => prev.map(p => {
+                            if (p.id === targetPolicy.id || (targetPolicy.rawId && p.rawId === targetPolicy.rawId)) {
+                                return { ...p, status: 'Cancelled' };
+                            }
+                            return p;
+                        }));
+                    }
 
                     if (!isDemo) {
                         try {
-                            await updatePolicyHasura(selectedRequest.polizaId, { status: 'Cancelled' }, isDemo);
+                            const targetDbId = targetPolicy.rawId || targetPolicy.id;
+                            await updatePolicyHasura(targetDbId, { status: 'Cancelled' }, isDemo);
                             await insertMovimientoHasura({
-                                polizaId: selectedRequest.polizaId,
+                                polizaId: targetDbId,
                                 date: today,
                                 type: 'Cancelación de Póliza',
-                                description: `Cancelación formal aprobada bajo solicitud ${selectedRequest.id}. Motivo: ${selectedRequest.reason || selectedRequest.subtype || 'A solicitud'}.`,
-                                evidence: 'Solicitud Aprobada'
+                                description: `Cancelación formal aplicada al cerrar y aprobar la solicitud ${selectedRequest.id}. Motivo: ${selectedRequest.reason || selectedRequest.subtype || 'A solicitud'}.`,
+                                evidence: `Solicitud ${selectedRequest.id} Aprobada`
                             }, isDemo);
                         } catch (err) {
                             console.warn('Error auto-updating policy cancellation:', err);
                         }
                     }
-                } else if (selectedRequest.type === 'Cambio en Póliza' && selectedRequest.polizaId) {
+                } else if (selectedRequest.type === 'Cambio en Póliza' && targetPolicy) {
                     // Add movement to policy history
                     if (!isDemo) {
                         try {
+                            const targetDbId = targetPolicy.rawId || targetPolicy.id;
                             await insertMovimientoHasura({
-                                polizaId: selectedRequest.polizaId,
+                                polizaId: targetDbId,
                                 date: today,
                                 type: `Endoso: ${selectedRequest.subtype || 'Modificación'}`,
                                 description: `Endoso No. ${endorsementNumberInput || 'S/N'}. ${selectedRequest.description || 'Cambio en condiciones de póliza aplicado.'}`,

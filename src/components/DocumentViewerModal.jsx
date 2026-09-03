@@ -5,9 +5,22 @@ import {
 } from 'lucide-react';
 import { formatFileSize } from '../services/documentsService';
 
-const DocumentViewerModal = ({ isOpen, onClose, document: doc, entityInfo = null }) => {
+const DocumentViewerModal = ({ isOpen, onClose, document: singleDoc, documents: docList = null, entityInfo = null }) => {
+  const [currentIndex, setCurrentIndex] = useState(0);
   const [zoom, setZoom] = useState(1);
   const [rotation, setRotation] = useState(0);
+
+  const docs = (docList && docList.length > 0) 
+    ? docList 
+    : (Array.isArray(singleDoc) ? singleDoc : (singleDoc ? [singleDoc] : []));
+
+  const doc = docs[currentIndex] || docs[0];
+
+  React.useEffect(() => {
+    setCurrentIndex(0);
+    setZoom(1);
+    setRotation(0);
+  }, [singleDoc, docList, isOpen]);
 
   if (!isOpen || !doc) return null;
 
@@ -70,6 +83,54 @@ const DocumentViewerModal = ({ isOpen, onClose, document: doc, entityInfo = null
         flexDirection: 'column',
         overflow: 'hidden'
       }}>
+        {/* Multi-document Tab Switcher Bar if > 1 Document */}
+        {docs.length > 1 && (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.4rem',
+            padding: '0.6rem 1.25rem',
+            backgroundColor: '#0f172a',
+            overflowX: 'auto',
+            borderBottom: '1px solid #334155'
+          }}>
+            <span style={{ color: '#94a3b8', fontSize: '0.78rem', fontWeight: '700', marginRight: '0.5rem', whiteSpace: 'nowrap' }}>
+              Documentos ({docs.length}):
+            </span>
+            {docs.map((d, idx) => (
+              <button
+                key={d.id || idx}
+                type="button"
+                onClick={() => {
+                  setCurrentIndex(idx);
+                  setZoom(1);
+                  setRotation(0);
+                }}
+                style={{
+                  padding: '0.35rem 0.75rem',
+                  borderRadius: 'var(--radius-sm)',
+                  backgroundColor: currentIndex === idx ? 'var(--primary)' : 'rgba(255,255,255,0.1)',
+                  color: currentIndex === idx ? '#ffffff' : '#cbd5e1',
+                  border: currentIndex === idx ? '1px solid #3b82f6' : '1px solid transparent',
+                  fontSize: '0.8rem',
+                  fontWeight: '700',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.35rem',
+                  whiteSpace: 'nowrap',
+                  transition: 'all 0.15s ease'
+                }}
+              >
+                <FileText size={13} />
+                <span style={{ maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {d.name || `Documento ${idx + 1}`}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Header con Título, Metadata y Acciones */}
         <div style={{
           padding: '1rem 1.5rem',
@@ -108,8 +169,20 @@ const DocumentViewerModal = ({ isOpen, onClose, document: doc, entityInfo = null
                   color: '#0369a1',
                   fontWeight: '700'
                 }}>
-                  {doc.category || 'General'}
+                  {doc.category || 'Comprobante de Pago'}
                 </span>
+                {docs.length > 1 && (
+                  <span style={{
+                    fontSize: '0.75rem',
+                    padding: '0.1rem 0.5rem',
+                    borderRadius: '999px',
+                    backgroundColor: '#fef3c7',
+                    color: '#92400e',
+                    fontWeight: '700'
+                  }}>
+                    {currentIndex + 1} de {docs.length}
+                  </span>
+                )}
                 {doc.isSystemGenerated && (
                   <span style={{
                     fontSize: '0.72rem',

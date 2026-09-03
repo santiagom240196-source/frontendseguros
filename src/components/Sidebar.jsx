@@ -1,9 +1,9 @@
 import React from 'react';
-import { Home, Users, FileText, Settings, Shield, DollarSign, PieChart, Building2, Pin, User, ShieldAlert, ArrowLeftRight, CheckCircle2, FileCheck } from 'lucide-react';
+import { Home, Users, FileText, Settings, Shield, DollarSign, PieChart, Building2, Pin, User, ShieldAlert, ArrowLeftRight, CheckCircle2, FileCheck, LogOut } from 'lucide-react';
 import { useUser } from '../context/UserContext';
 
 const Sidebar = ({ activePage, onNavigate, isPinned, onTogglePin, isCollapsed, requests = [] }) => {
-    const { currentUser, switchUser, isDemo } = useUser();
+    const { currentUser, switchUser, isDemo, logout } = useUser();
 
     const pendingRequestsCount = Array.isArray(requests) ? requests.filter(r => r.status === 'Pendiente').length : 0;
 
@@ -21,9 +21,9 @@ const Sidebar = ({ activePage, onNavigate, isPinned, onTogglePin, isCollapsed, r
 
     const toggleUser = () => {
         if (isDemo) {
-            switchUser('santiago');
+            switchUser('santiagom2401');
         } else {
-            switchUser('demo_user');
+            switchUser('admin');
         }
     };
 
@@ -263,7 +263,42 @@ const Sidebar = ({ activePage, onNavigate, isPinned, onTogglePin, isCollapsed, r
                         }}
                     >
                         <ArrowLeftRight size={13} />
-                        {isDemo ? 'Volver a Santiago Morales' : 'Cambiar a Usuario de Prueba'}
+                        {isDemo ? 'Iniciar como Santiago Alberto Morales' : 'Cambiar a Usuario de Prueba (admin)'}
+                    </button>
+
+                    <button
+                        onClick={logout}
+                        style={{
+                            width: '100%',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: '0.45rem',
+                            padding: '0.4rem',
+                            marginTop: '0.4rem',
+                            fontSize: '0.76rem',
+                            fontWeight: '600',
+                            color: 'rgba(255, 255, 255, 0.75)',
+                            backgroundColor: 'transparent',
+                            border: '1px dashed rgba(255, 255, 255, 0.2)',
+                            borderRadius: 'var(--radius-sm)',
+                            cursor: 'pointer',
+                            transition: 'all 0.2s'
+                        }}
+                        onMouseEnter={e => {
+                            e.currentTarget.style.backgroundColor = 'rgba(239, 68, 68, 0.2)';
+                            e.currentTarget.style.color = '#fca5a5';
+                            e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.4)';
+                        }}
+                        onMouseLeave={e => {
+                            e.currentTarget.style.backgroundColor = 'transparent';
+                            e.currentTarget.style.color = 'rgba(255, 255, 255, 0.75)';
+                            e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.2)';
+                        }}
+                        title="Cerrar sesión actual y volver a pantalla de login"
+                    >
+                        <LogOut size={12} />
+                        <span>Cerrar Sesión / Salir</span>
                     </button>
                 </div>
             )}

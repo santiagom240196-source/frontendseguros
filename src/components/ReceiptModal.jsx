@@ -123,8 +123,11 @@ const ReceiptModal = ({ isOpen, onClose, payment, policy = {}, client = {} }) =>
               <h3 style={{ margin: 0, color: 'white', fontSize: '1.2rem', fontWeight: '700' }}>
                 Recibo de Pago Oficial ({payment.id || payment.receiptId})
               </h3>
-              <p style={{ margin: '0.15rem 0 0', fontSize: '0.8rem', color: 'rgba(255,255,255,0.8)' }}>
-                {payment.client} · {formatMoney(payment.amountNum || payment.amount)}
+              <p style={{ margin: '0.15rem 0 0', fontSize: '0.82rem', color: 'rgba(255,255,255,0.85)' }}>
+                {payment.client} · Pagado: <strong>{formatMoney(payment.amountNum || payment.amount, payment.currency || policy.currency)}</strong>
+                {payment.remainingBalance !== undefined ? (
+                  <span> · Restante: <strong style={{ color: payment.remainingBalance > 0 ? '#fde68a' : '#86efac' }}>{formatMoney(payment.remainingBalance, payment.currency || policy.currency)}</strong></span>
+                ) : null}
               </p>
             </div>
           </div>

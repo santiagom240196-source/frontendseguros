@@ -19,16 +19,15 @@ function generateExcelBuffer(insurer, details, period) {
         [`Período: ${period}`],
         [`Generado: ${new Date().toLocaleString('es-DO')}`],
         [],
-        ['ID Pago', 'Cliente', 'Fecha', 'Prima (RD$)', 'Comisión (RD$)', '% Comisión'],
+        ['ID Pago', 'Cliente', 'No. Póliza', 'Fecha', 'Prima (RD$)', '% Comisión', 'Comisión (RD$)'],
         ...details.map(p => [
-            p.id, p.client, formatDateToDDMMYYYY(p.date),
-            p.premium, p.commissionAmount,
-            parseFloat((p.commissionAmount / p.premium * 100).toFixed(2))
+            p.id, p.client, p.policyId || 'N/A', formatDateToDDMMYYYY(p.date),
+            p.premium, `${p.commissionRate || 15}%`, p.commissionAmount
         ]),
-        ['', '', 'TOTAL', totalPremium, totalCommission, '']
+        ['', '', '', 'TOTAL', totalPremium, '', totalCommission]
     ];
     const ws = XLSX.utils.aoa_to_sheet(allRows);
-    ws['!cols'] = [{ wch: 12 }, { wch: 28 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 12 }];
+    ws['!cols'] = [{ wch: 12 }, { wch: 28 }, { wch: 20 }, { wch: 14 }, { wch: 16 }, { wch: 14 }, { wch: 16 }];
     XLSX.utils.book_append_sheet(wb, ws, 'Comisiones');
     return XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
 }
@@ -79,15 +78,15 @@ function generatePDFBlob(insurer, details, period) {
     // Table
     autoTable(doc, {
         startY: 42,
-        head: [['ID Pago', 'Cliente', 'Fecha', 'Prima (RD$)', 'Comisión (RD$)', '% Comisión']],
+        head: [['ID Pago', 'Cliente', 'Fecha', 'Prima (RD$)', '% Com.', 'Comisión (RD$)']],
         body: [
             ...details.map(p => [
                 p.id, p.client, formatDateToDDMMYYYY(p.date),
                 fmt(p.premium),
-                fmt(p.commissionAmount),
-                `${(p.commissionAmount / p.premium * 100).toFixed(1)}%`
+                `${p.commissionRate || 15}%`,
+                fmt(p.commissionAmount)
             ]),
-            ['', '', 'TOTAL', fmt(totalPremium), fmt(totalCommission), '']
+            ['', '', 'TOTAL', fmt(totalPremium), '', fmt(totalCommission)]
         ],
         headStyles: { fillColor: [30, 64, 175], textColor: 255, fontStyle: 'bold', fontSize: 9 },
         alternateRowStyles: { fillColor: [248, 250, 252] },
@@ -135,7 +134,6 @@ const CommissionReport = ({ payments = [], policies = [] }) => {
     const [dateTo, setDateTo] = useState(today);
     const [selectedCartera, setSelectedCartera] = useState('ALL');
     const [selectedInsurer, setSelectedInsurer] = useState(null);
-    const [showRatesModal, setShowRatesModal] = useState(false);
 
     // Drive State
     const [showDriveConfig, setShowDriveConfig] = useState(false);
@@ -208,29 +206,6 @@ const CommissionReport = ({ payments = [], policies = [] }) => {
         }
     };
 
-    const [insurerRates, setInsurerRates] = useState(() => {
-        const saved = localStorage.getItem('insurer_commission_rates');
-        if (saved) return JSON.parse(saved);
-        return {
-            'Seguros Universal': 0.20,
-            'Humano Seguros': 0.15,
-            'Mapfre BHD Seguros': 0.22,
-            'La Colonial de Seguros': 0.20,
-            'Seguros Reservas': 0.18,
-            'Seguros Sura': 0.15,
-            'General de Seguros': 0.12,
-            'Dominicana de Seguros': 0.15,
-            'Patria Compañía de Seguros': 0.15,
-            'Aspirante Seguros': 0.15,
-            'Seguros Pepín': 0.10,
-            'La Monumental de Seguros': 0.15,
-            'Angloamericana de Seguros': 0.15,
-            'CoopSeguros': 0.15,
-            'Seguros Crecer': 0.15,
-            'K&M Seguros': 0.15
-        };
-    });
-
     const setQuickRange = (type) => {
         const d = new Date();
         if (type === 'month') { const f = new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split('T')[0]; setDateFrom(f); setDateTo(today); }
@@ -264,27 +239,32 @@ const CommissionReport = ({ payments = [], policies = [] }) => {
         const byInsurer = {};
         let totalCommission = 0, totalPremiums = 0;
         relevant.forEach(p => {
-            const policy = policies.find(pol => pol.id === p.policyId);
+            const policy = policies.find(pol => pol.id === p.policyId || String(pol.id) === String(p.policyId) || (pol.rawId && String(pol.rawId) === String(p.polizaId)));
             const insurer = policy ? policy.insurer : 'Otros';
             const premium = p.amountNum || parseFloat(String(p.amount).replace(/[^0-9.]/g, '')) || 0;
-            const rate = insurerRates[insurer] || 0.10;
+            const polPercent = (policy?.commissionRate !== undefined && policy?.commissionRate !== null)
+                ? Number(policy.commissionRate)
+                : (policy?.porcentajeComision !== undefined && policy?.porcentajeComision !== null ? Number(policy.porcentajeComision) : 15.0);
+            const rate = polPercent / 100;
             const commission = premium * rate;
-            if (!byInsurer[insurer]) byInsurer[insurer] = { premiums: 0, commission: 0, count: 0, rate, details: [] };
+            if (!byInsurer[insurer]) byInsurer[insurer] = { premiums: 0, commission: 0, count: 0, details: [] };
             byInsurer[insurer].premiums += premium;
             byInsurer[insurer].commission += commission;
             byInsurer[insurer].count += 1;
             byInsurer[insurer].details.push({
                 ...p,
+                policyId: policy?.id || p.policyId,
                 client: p.client,
                 insurer: insurer,
                 premium: premium,
+                commissionRate: polPercent,
                 commissionAmount: commission
             });
             totalCommission += commission;
             totalPremiums += premium;
         });
         return { byInsurer, totalCommission, totalPremiums, count: relevant.length };
-    }, [payments, policies, dateFrom, dateTo, selectedCartera, insurerRates]);
+    }, [payments, policies, dateFrom, dateTo, selectedCartera]);
 
     const formatCurrency = (n) => formatMoney(n);
 
@@ -365,10 +345,6 @@ const CommissionReport = ({ payments = [], policies = [] }) => {
                         {!driveConfigured && (
                             <span style={{ position: 'absolute', top: -4, right: -4, width: 10, height: 10, backgroundColor: '#f59e0b', borderRadius: '50%', border: '2px solid white' }} />
                         )}
-                    </button>
-                    <button className="btn" onClick={() => setShowRatesModal(true)}
-                        style={{ padding: '0.5rem 1rem', border: '1px solid var(--border)', backgroundColor: 'white', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                        <PieChart size={20} /> Configurar Tasas %
                     </button>
                     {!selectedInsurer && accessToken && Object.keys(reportData.byInsurer).length > 0 && (
                         <button className="btn btn-primary" onClick={handleUploadAll} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -568,7 +544,9 @@ const CommissionReport = ({ payments = [], policies = [] }) => {
                                                     </td>
                                                     <td style={{ padding: '1rem', textAlign: 'right' }}>{data.count}</td>
                                                     <td style={{ padding: '1rem', textAlign: 'right' }}>{formatCurrency(data.premiums)}</td>
-                                                    <td style={{ padding: '1rem', textAlign: 'right' }}>{parseFloat((data.rate * 100).toFixed(2))}%</td>
+                                                    <td style={{ padding: '1rem', textAlign: 'right', fontWeight: '600' }}>
+                                                        {data.premiums > 0 ? ((data.commission / data.premiums) * 100).toFixed(1) : '0.0'}%
+                                                    </td>
                                                     <td style={{ padding: '1rem', textAlign: 'right', fontWeight: 'bold', color: 'var(--success)' }}>
                                                         {formatCurrency(data.commission)}
                                                     </td>
@@ -667,9 +645,11 @@ const CommissionReport = ({ payments = [], policies = [] }) => {
                             <thead>
                                 <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid var(--border)' }}>
                                     <th style={{ padding: '1rem', textAlign: 'left', color: 'var(--text-muted)' }}>Cliente</th>
+                                    <th style={{ padding: '1rem', textAlign: 'left', color: 'var(--text-muted)' }}>No. Póliza</th>
                                     <th style={{ padding: '1rem', textAlign: 'left', color: 'var(--text-muted)' }}>Fecha Pago</th>
                                     <th style={{ padding: '1rem', textAlign: 'left', color: 'var(--text-muted)' }}>ID Pago</th>
                                     <th style={{ padding: '1rem', textAlign: 'right', color: 'var(--text-muted)' }}>Prima Pagada</th>
+                                    <th style={{ padding: '1rem', textAlign: 'right', color: 'var(--text-muted)' }}>% Comisión</th>
                                     <th style={{ padding: '1rem', textAlign: 'right', color: 'var(--text-muted)' }}>Comisión Generada</th>
                                 </tr>
                             </thead>
@@ -677,9 +657,11 @@ const CommissionReport = ({ payments = [], policies = [] }) => {
                                 {(reportData.byInsurer[selectedInsurer]?.details || []).map(p => (
                                     <tr key={p.id} style={{ borderBottom: '1px solid var(--border)' }}>
                                         <td style={{ padding: '1rem', fontWeight: '600' }}>{p.client}</td>
+                                        <td style={{ padding: '1rem', fontSize: '0.88rem', color: '#1e3a8a', fontWeight: '600' }}>{p.policyId || 'N/A'}</td>
                                         <td style={{ padding: '1rem' }}>{formatDateToDDMMYYYY(p.date)}</td>
                                         <td style={{ padding: '1rem', fontSize: '0.9rem', color: 'var(--text-muted)' }}>{p.id}</td>
                                         <td style={{ padding: '1rem', textAlign: 'right' }}>{formatCurrency(p.premium)}</td>
+                                        <td style={{ padding: '1rem', textAlign: 'right', fontWeight: '700', color: '#0369a1' }}>{p.commissionRate || 15}%</td>
                                         <td style={{ padding: '1rem', textAlign: 'right', fontWeight: 'bold', color: 'var(--success)' }}>
                                             {formatCurrency(p.commissionAmount)}
                                         </td>
@@ -700,59 +682,6 @@ const CommissionReport = ({ payments = [], policies = [] }) => {
                                 </tfoot>
                             )}
                         </table>
-                    </div>
-                </div>
-            )}
-
-            {/* Commission Rates Modal */}
-            {showRatesModal && (
-                <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '1rem' }}>
-                    <div className="card" style={{ width: '100%', maxWidth: '500px', backgroundColor: 'white', maxHeight: '90vh', overflowY: 'auto' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-                            <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                <Settings size={22} color="var(--primary)" /> Tasas de Comisión por Compañía
-                            </h3>
-                            <button onClick={() => setShowRatesModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer' }}>
-                                <X size={24} />
-                            </button>
-                        </div>
-                        <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', marginBottom: '1.5rem' }}>
-                            Fije el porcentaje fijo de comisión correspondiente a cada aseguradora para los cálculos de reportes.
-                        </p>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1.5rem' }}>
-                            {Object.keys(insurerRates).map(insurer => (
-                                <div key={insurer} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                    <InsurerLogo name={insurer} size={24} showName={true} textStyle={{ fontWeight: '500', fontSize: '0.95rem' }} />
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                        <input
-                                            type="number"
-                                            min="0"
-                                            max="100"
-                                            step="any"
-                                            defaultValue={insurerRates[insurer] !== undefined ? parseFloat((insurerRates[insurer] * 100).toFixed(4)) : ''}
-                                            key={`${insurer}_${insurerRates[insurer]}`}
-                                            onChange={e => {
-                                                const val = parseFloat(e.target.value) / 100;
-                                                if (!isNaN(val) && val >= 0 && val <= 1) {
-                                                    const updated = { ...insurerRates, [insurer]: val };
-                                                    setInsurerRates(updated);
-                                                    if (!isDemo) {
-                                                        localStorage.setItem('insurer_commission_rates', JSON.stringify(updated));
-                                                    }
-                                                }
-                                            }}
-                                            style={{ width: '85px', padding: '0.35rem 0.5rem', textAlign: 'right', fontWeight: '600' }}
-                                        />
-                                        <span style={{ fontWeight: '600' }}>%</span>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                            <button className="btn btn-primary" onClick={() => setShowRatesModal(false)}>
-                                Aceptar
-                            </button>
-                        </div>
                     </div>
                 </div>
             )}

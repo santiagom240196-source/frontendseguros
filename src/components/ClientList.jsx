@@ -6,7 +6,7 @@ import {
     Zap, CreditCard, Check
 } from 'lucide-react';
 import { DR_LOCATIONS, getSectors } from '../constants/locations';
-import { getNextRenewalDate, calculatePolicyStatus, formatDateToDDMMYYYY, formatMoney, isOpenClaim, getClientClaims } from '../utils/policyHelpers';
+import { getNextRenewalDate, calculatePolicyStatus, formatDateToDDMMYYYY, formatMoney, isOpenClaim, getClientClaims, getPolicyPaymentStats } from '../utils/policyHelpers';
 import InsurerLogo from './InsurerLogo';
 import { useUser } from '../context/UserContext';
 import { insertClientHasura, updateClientHasura } from '../services/hasuraService';
@@ -23,6 +23,8 @@ const ClientList = ({
     payments = [], 
     claims = [], 
     agentCodes = [], 
+    initialSelectedClientId,
+    onClearSelection,
     onNavigateToPolicy, 
     onNavigateToClaim 
 }) => {
@@ -35,6 +37,27 @@ const ClientList = ({
     const [selectedClient, setSelectedClient] = useState(null);
     const [showViewModal, setShowViewModal] = useState(false);
     const [isEditing, setIsEditing] = useState(false);
+
+    // Auto-select client when navigated from global search
+    useEffect(() => {
+        if (initialSelectedClientId && Array.isArray(clients) && clients.length > 0) {
+            const found = clients.find(c => 
+                String(c.id).toLowerCase() === String(initialSelectedClientId).toLowerCase() || 
+                String(c.documentId) === String(initialSelectedClientId) ||
+                c.name?.toLowerCase() === String(initialSelectedClientId).toLowerCase()
+            );
+            if (found) {
+                setSelectedClient(found);
+                setShowViewModal(true);
+            }
+        }
+    }, [initialSelectedClientId, clients]);
+
+    const handleCloseViewModal = () => {
+        setShowViewModal(false);
+        setSelectedClient(null);
+        if (onClearSelection) onClearSelection();
+    };
 
     // Form State
     const [clientForm, setClientForm] = useState({
@@ -312,7 +335,7 @@ const ClientList = ({
                             <Edit size={15} /> Editar Cliente
                         </button>
                         <button
-                            onClick={() => setShowViewModal(false)}
+                            onClick={handleCloseViewModal}
                             style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', padding: '4px' }}
                             title="Cerrar"
                         >
@@ -491,16 +514,27 @@ const ClientList = ({
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.35rem', flexWrap: 'wrap' }}>
                                                     <InsurerLogo name={p.insurer} size={20} />
                                                     <span style={{ fontWeight: '700', fontSize: '1rem', color: 'var(--primary)' }}>{p.id}</span>
-                                                    <span style={{
-                                                        fontSize: '0.75rem',
-                                                        padding: '0.15rem 0.5rem',
-                                                        borderRadius: '999px',
-                                                        fontWeight: '600',
-                                                        backgroundColor: computedStatus === 'Active' ? '#dcfce7' : computedStatus === 'Pending' ? '#fef9c3' : computedStatus === 'Expiring' ? '#fffbeb' : '#fee2e2',
-                                                        color: computedStatus === 'Active' ? '#166534' : computedStatus === 'Pending' ? '#854d0e' : computedStatus === 'Expiring' ? '#9a3412' : '#991b1b'
-                                                    }}>
-                                                        {computedStatus === 'Active' ? 'Vigente' : computedStatus === 'Pending' ? 'Pendiente' : computedStatus === 'Expiring' ? 'Por Vencer' : 'Vencida'}
-                                                    </span>
+                                                    {(() => {
+                                                        const pStats = getPolicyPaymentStats(p, payments);
+                                                        const isPaid = pStats.totalOwed <= 0;
+                                                        const isExp = computedStatus === 'Expiring' || computedStatus === 'Pending';
+                                                        const label = computedStatus === 'Active' ? 'Disponible' : isExp ? (isPaid ? 'Próximo a renovar' : 'A punto de vencer') : 'Vencido';
+                                                        const bg = computedStatus === 'Active' ? '#dcfce7' : isExp ? (isPaid ? '#e0f2fe' : '#ffedd5') : '#fee2e2';
+                                                        const color = computedStatus === 'Active' ? '#166534' : isExp ? (isPaid ? '#0369a1' : '#9a3412') : '#991b1b';
+
+                                                        return (
+                                                            <span style={{
+                                                                fontSize: '0.75rem',
+                                                                padding: '0.15rem 0.5rem',
+                                                                borderRadius: '999px',
+                                                                fontWeight: '700',
+                                                                backgroundColor: bg,
+                                                                color: color
+                                                            }}>
+                                                                {label}
+                                                            </span>
+                                                        );
+                                                    })()}
                                                 </div>
 
                                                 <div style={{ fontSize: '0.9rem', fontWeight: '600', color: 'var(--text-main)', marginBottom: '0.25rem' }}>
@@ -1052,17 +1086,28 @@ const ClientList = ({
                                                                         <span style={{ color: 'var(--text-muted)' }}>·</span>
                                                                         <span style={{ fontWeight: '500', color: 'var(--text-main)', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>{p.type}</span>
                                                                     </div>
-                                                                    <span style={{
-                                                                        fontSize: '0.7rem',
-                                                                        padding: '0.1rem 0.4rem',
-                                                                        borderRadius: '999px',
-                                                                        fontWeight: '600',
-                                                                        whiteSpace: 'nowrap',
-                                                                        backgroundColor: computedStatus === 'Active' ? '#dcfce7' : computedStatus === 'Pending' ? '#fef9c3' : '#fee2e2',
-                                                                        color: computedStatus === 'Active' ? '#166534' : computedStatus === 'Pending' ? '#854d0e' : '#991b1b'
-                                                                    }}>
-                                                                        {computedStatus === 'Active' ? 'Vigente' : computedStatus === 'Pending' ? 'Pendiente' : 'Vencida'}
-                                                                    </span>
+                                                                    {(() => {
+                                                                        const pStats = getPolicyPaymentStats(p, payments);
+                                                                        const isPaid = pStats.totalOwed <= 0;
+                                                                        const isExp = computedStatus === 'Expiring' || computedStatus === 'Pending';
+                                                                        const label = computedStatus === 'Active' ? 'Disponible' : isExp ? (isPaid ? 'Próximo a renovar' : 'A punto de vencer') : 'Vencido';
+                                                                        const bg = computedStatus === 'Active' ? '#dcfce7' : isExp ? (isPaid ? '#e0f2fe' : '#ffedd5') : '#fee2e2';
+                                                                        const color = computedStatus === 'Active' ? '#166534' : isExp ? (isPaid ? '#0369a1' : '#9a3412') : '#991b1b';
+
+                                                                        return (
+                                                                            <span style={{
+                                                                                fontSize: '0.7rem',
+                                                                                padding: '0.12rem 0.5rem',
+                                                                                borderRadius: '999px',
+                                                                                fontWeight: '700',
+                                                                                whiteSpace: 'nowrap',
+                                                                                backgroundColor: bg,
+                                                                                color: color
+                                                                            }}>
+                                                                                {label}
+                                                                            </span>
+                                                                        );
+                                                                    })()}
                                                                 </button>
                                                             );
                                                         })}

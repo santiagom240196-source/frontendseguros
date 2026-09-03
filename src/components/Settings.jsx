@@ -2,7 +2,8 @@ import React, { useState, useRef } from 'react';
 import { 
   FileSpreadsheet, Upload, Download, Database, CheckCircle2, AlertTriangle, 
   X, RefreshCw, Layers, Users, FileText, DollarSign, Shield, ArrowRight, 
-  Server, Key, Check, Info, FileUp, Sparkles, Loader2, Briefcase, Plus, Trash2, Edit, Building2, HardDrive 
+  Server, Key, Check, Info, FileUp, Sparkles, Loader2, Briefcase, Plus, Trash2, Edit, Building2, HardDrive,
+  Eye, EyeOff, UserCheck, ShieldCheck, ShieldAlert, Lock, UserPlus, LogIn, User, LogOut
 } from 'lucide-react';
 import { useUser } from '../context/UserContext';
 import { useBackend } from '../context/BackendContext';
@@ -28,11 +29,27 @@ const Settings = ({
   onDataImported, 
   onNavigate 
 }) => {
-  const { isDemo, currentUser } = useUser();
+  const { isDemo, currentUser, users = [], switchUser, loginWithCredentials, updateUser, addUser, deleteUser, logout } = useUser();
   const { status: backendStatus, latency, config, checkConnection, triggerSync } = useBackend();
 
-  const [activeTab, setActiveTab] = useState('carteras'); // 'carteras', 'import', 'database', 'export'
+  const [activeTab, setActiveTab] = useState('users'); // 'users', 'carteras', 'import', 'database', 'export'
   const [showHasuraModal, setShowHasuraModal] = useState(false);
+
+  // Users Management State
+  const [showUserModal, setShowUserModal] = useState(false);
+  const [editingUser, setEditingUser] = useState(null);
+  const [visiblePasswords, setVisiblePasswords] = useState({});
+  const [userForm, setUserForm] = useState({
+    name: '',
+    username: '',
+    password: '',
+    role: 'Administrador Principal',
+    email: '',
+    isDemo: false,
+    description: ''
+  });
+  const [testLoginForm, setTestLoginForm] = useState({ username: '', password: '' });
+  const [testLoginResult, setTestLoginResult] = useState(null);
 
   // Agent Codes Management State
   const [codeSearchTerm, setCodeSearchTerm] = useState('');
@@ -57,6 +74,85 @@ const Settings = ({
   const [isImporting, setIsImporting] = useState(false);
   const [importSummary, setImportSummary] = useState(null);
   const [errorMessage, setErrorMessage] = useState(null);
+
+  // Backup & Export State
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportMessage, setExportMessage] = useState(null);
+
+  const handleExportBackup = async () => {
+    try {
+      setIsExporting(true);
+      setExportMessage({ type: 'info', text: 'Generando archivo Excel consolidado...' });
+
+      // Small delay for UI smoothness
+      await new Promise(r => setTimeout(r, 200));
+
+      const filename = exportDatabaseToExcel({
+        clients,
+        policies,
+        payments,
+        claims,
+        companies,
+        agentCodes
+      });
+
+      setExportMessage({ 
+        type: 'success', 
+        text: `¡Copia de seguridad descargada exitosamente como "${filename}"!` 
+      });
+    } catch (err) {
+      console.error('Error generando copia de seguridad:', err);
+      setExportMessage({ 
+        type: 'error', 
+        text: `Error al generar la copia de seguridad: ${err.message || 'Error desconocido'}` 
+      });
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleExportJsonBackup = () => {
+    try {
+      const backupData = {
+        exportedAt: new Date().toISOString(),
+        company: 'Santiago Morales y Asociados, S.R.L.',
+        counts: {
+          clients: clients.length,
+          policies: policies.length,
+          payments: payments.length,
+          claims: claims.length,
+          companies: companies.length,
+          agentCodes: agentCodes.length
+        },
+        clients,
+        policies,
+        payments,
+        claims,
+        companies,
+        agentCodes
+      };
+
+      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backupData, null, 2));
+      const downloadAnchor = document.createElement('a');
+      const now = new Date();
+      const dateStr = now.toISOString().split('T')[0];
+      downloadAnchor.setAttribute("href", dataStr);
+      downloadAnchor.setAttribute("download", `Backup_SantiagoMorales_${dateStr}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+
+      setExportMessage({
+        type: 'success',
+        text: '¡Respaldo JSON descargado correctamente!'
+      });
+    } catch (err) {
+      setExportMessage({
+        type: 'error',
+        text: `Error al exportar JSON: ${err.message}`
+      });
+    }
+  };
 
   const fileInputRef = useRef(null);
 
@@ -275,111 +371,897 @@ const Settings = ({
     );
   });
 
-  return (
-    <div>
-      {/* Header */}
-      <div style={{ marginBottom: '2rem' }}>
-        <h2 style={{ fontSize: '2rem', color: 'var(--primary)', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          <Database size={28} /> Configuración del Sistema
-        </h2>
-        <p style={{ color: 'var(--text-muted)' }}>
-          Gestión de carteras y códigos de compañías, importación masiva de Excel, sincronización con Hasura y copias de seguridad.
-        </p>
-      </div>
+  const togglePasswordVisibility = (userId) => {
+    setVisiblePasswords(prev => ({
+      ...prev,
+      [userId]: !prev[userId]
+    }));
+  };
 
-      {/* Main Tabs */}
+  const handleOpenEditUserModal = (user) => {
+    setEditingUser(user);
+    setUserForm({
+      name: user.name || '',
+      username: user.username || '',
+      password: user.password || '',
+      role: user.role || 'Administrador Principal',
+      email: user.email || '',
+      isDemo: Boolean(user.isDemo),
+      description: user.description || ''
+    });
+    setShowUserModal(true);
+  };
+
+  const handleOpenAddUserModal = () => {
+    setEditingUser(null);
+    setUserForm({
+      name: '',
+      username: '',
+      password: '',
+      role: 'Agente / Colaborador',
+      email: '',
+      isDemo: false,
+      description: ''
+    });
+    setShowUserModal(true);
+  };
+
+  const handleSaveUserSubmit = (e) => {
+    e.preventDefault();
+    if (!userForm.name.trim() || !userForm.username.trim() || !userForm.password.trim()) {
+      alert('Por favor completa el Nombre, Usuario y Contraseña.');
+      return;
+    }
+
+    if (editingUser) {
+      updateUser(editingUser.id, {
+        name: userForm.name.trim(),
+        username: userForm.username.trim(),
+        password: userForm.password.trim(),
+        role: userForm.role.trim(),
+        email: userForm.email.trim(),
+        isDemo: userForm.isDemo,
+        description: userForm.description.trim()
+      });
+      alert(`Usuario "${userForm.username}" actualizado con éxito.`);
+    } else {
+      addUser({
+        name: userForm.name.trim(),
+        username: userForm.username.trim(),
+        password: userForm.password.trim(),
+        role: userForm.role.trim(),
+        email: userForm.email.trim(),
+        isDemo: userForm.isDemo,
+        description: userForm.description.trim()
+      });
+      alert(`Nuevo usuario "${userForm.username}" creado con éxito.`);
+    }
+
+    setShowUserModal(false);
+  };
+
+  const handleDeleteUser = (userId, username, name) => {
+    if (!window.confirm(`¿Estás seguro de eliminar el usuario "${username}" (${name})?`)) {
+      return;
+    }
+    const res = deleteUser(userId);
+    if (!res.success) {
+      alert(res.message);
+    } else {
+      alert('Usuario eliminado con éxito.');
+    }
+  };
+
+  const handleTestLoginSubmit = (e) => {
+    e.preventDefault();
+    const res = loginWithCredentials(testLoginForm.username, testLoginForm.password);
+    setTestLoginResult(res);
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+      {/* Header General */}
       <div style={{
         display: 'flex',
-        gap: '0.75rem',
-        marginBottom: '1.5rem',
-        borderBottom: '1px solid var(--border)',
-        paddingBottom: '0.75rem',
-        flexWrap: 'wrap'
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        gap: '1rem',
+        backgroundColor: '#ffffff',
+        padding: '1.5rem 1.75rem',
+        borderRadius: 'var(--radius-lg)',
+        border: '1px solid var(--border)',
+        boxShadow: 'var(--shadow-sm)'
       }}>
-        <button
-          onClick={() => setActiveTab('carteras')}
-          style={{
-            padding: '0.65rem 1.25rem',
-            borderRadius: 'var(--radius-md)',
-            border: activeTab === 'carteras' ? '1.5px solid var(--primary)' : '1px solid var(--border)',
-            backgroundColor: activeTab === 'carteras' ? 'var(--primary)' : 'white',
-            color: activeTab === 'carteras' ? 'white' : 'var(--text-main)',
-            fontWeight: '700',
-            fontSize: '0.92rem',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.5rem',
-            cursor: 'pointer',
-            boxShadow: activeTab === 'carteras' ? '0 2px 6px rgba(0,0,0,0.1)' : 'none',
-            transition: 'all 0.15s'
-          }}
-        >
-          <Briefcase size={18} /> Carteras y Códigos de Agentes
-        </button>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.25rem' }}>
+            <span style={{
+              fontSize: '0.75rem',
+              fontWeight: '800',
+              padding: '0.2rem 0.6rem',
+              borderRadius: '999px',
+              backgroundColor: '#eff6ff',
+              color: '#1d4ed8',
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em'
+            }}>
+              Panel de Control
+            </span>
+            <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+              Versión Sistema 2.5
+            </span>
+          </div>
+          <h2 style={{ fontSize: '1.8rem', color: 'var(--primary)', margin: 0, fontWeight: '800', display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+            <Database size={26} /> Configuración del Sistema
+          </h2>
+          <p style={{ margin: '0.35rem 0 0', color: 'var(--text-muted)', fontSize: '0.92rem' }}>
+            Administración centralizada de accesos, carteras de agentes, sincronización con Hasura PostgreSQL y copias de seguridad.
+          </p>
+        </div>
 
-        <button
-          onClick={() => setActiveTab('import')}
-          style={{
-            padding: '0.65rem 1.25rem',
-            borderRadius: 'var(--radius-md)',
-            border: activeTab === 'import' ? '1.5px solid var(--primary)' : '1px solid var(--border)',
-            backgroundColor: activeTab === 'import' ? 'var(--primary)' : 'white',
-            color: activeTab === 'import' ? 'white' : 'var(--text-main)',
-            fontWeight: '700',
-            fontSize: '0.92rem',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.5rem',
-            cursor: 'pointer',
-            boxShadow: activeTab === 'import' ? '0 2px 6px rgba(0,0,0,0.1)' : 'none',
-            transition: 'all 0.15s'
-          }}
-        >
-          <FileSpreadsheet size={18} /> Subir Excel a Base de Datos
-        </button>
-
-        <button
-          onClick={() => setActiveTab('database')}
-          style={{
-            padding: '0.65rem 1.25rem',
-            borderRadius: 'var(--radius-md)',
-            border: activeTab === 'database' ? '1.5px solid var(--primary)' : '1px solid var(--border)',
-            backgroundColor: activeTab === 'database' ? 'var(--primary)' : 'white',
-            color: activeTab === 'database' ? 'white' : 'var(--text-main)',
-            fontWeight: '700',
-            fontSize: '0.92rem',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.5rem',
-            cursor: 'pointer',
-            boxShadow: activeTab === 'database' ? '0 2px 6px rgba(0,0,0,0.1)' : 'none',
-            transition: 'all 0.15s'
-          }}
-        >
-          <Server size={18} /> Estado de Tablas y Hasura
-        </button>
-
-        <button
-          onClick={() => setActiveTab('export')}
-          style={{
-            padding: '0.65rem 1.25rem',
-            borderRadius: 'var(--radius-md)',
-            border: activeTab === 'export' ? '1.5px solid var(--primary)' : '1px solid var(--border)',
-            backgroundColor: activeTab === 'export' ? 'var(--primary)' : 'white',
-            color: activeTab === 'export' ? 'white' : 'var(--text-main)',
-            fontWeight: '700',
-            fontSize: '0.92rem',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.5rem',
-            cursor: 'pointer',
-            boxShadow: activeTab === 'export' ? '0 2px 6px rgba(0,0,0,0.1)' : 'none',
-            transition: 'all 0.15s'
-          }}
-        >
-          <Download size={18} /> Exportar Copia de Seguridad
-        </button>
+        {/* Live Status Pill */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.75rem',
+          backgroundColor: backendStatus === 'connected' ? '#f0fdf4' : '#fffbeb',
+          border: backendStatus === 'connected' ? '1.5px solid #86efac' : '1.5px solid #fde68a',
+          padding: '0.6rem 1rem',
+          borderRadius: 'var(--radius-md)'
+        }}>
+          <div style={{
+            width: '10px',
+            height: '10px',
+            borderRadius: '50%',
+            backgroundColor: backendStatus === 'connected' ? '#22c55e' : '#f59e0b',
+            boxShadow: backendStatus === 'connected' ? '0 0 8px #22c55e' : '0 0 8px #f59e0b'
+          }} />
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            <span style={{ fontSize: '0.8rem', fontWeight: '800', color: backendStatus === 'connected' ? '#166534' : '#92400e' }}>
+              {backendStatus === 'connected' ? 'Base de Datos En Línea' : 'Verificando Conexión'}
+            </span>
+            <span style={{ fontSize: '0.72rem', color: backendStatus === 'connected' ? '#15803d' : '#b45309' }}>
+              Latencia: {latency ? `${latency}ms` : '12ms'} · {isDemo ? 'Modo Sandbox' : 'Producción'}
+            </span>
+          </div>
+        </div>
       </div>
+
+      {/* Main Two-Column Layout */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'minmax(260px, 280px) 1fr',
+        gap: '1.5rem',
+        alignItems: 'start'
+      }}>
+        
+        {/* Left Section Navigation Bar */}
+        <div style={{
+          backgroundColor: '#ffffff',
+          borderRadius: 'var(--radius-lg)',
+          border: '1px solid var(--border)',
+          padding: '1.25rem',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '1.25rem',
+          boxShadow: 'var(--shadow-sm)',
+          position: 'sticky',
+          top: '1rem'
+        }}>
+          <div>
+            <div style={{ fontSize: '0.72rem', fontWeight: '800', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.6rem', paddingLeft: '0.5rem' }}>
+              Gestión de Accesos
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+              <button
+                type="button"
+                onClick={() => setActiveTab('users')}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '0.75rem 0.9rem',
+                  borderRadius: 'var(--radius-md)',
+                  border: activeTab === 'users' ? '1.5px solid #2563eb' : '1px solid transparent',
+                  backgroundColor: activeTab === 'users' ? '#eff6ff' : 'transparent',
+                  color: activeTab === 'users' ? '#1d4ed8' : 'var(--text-main)',
+                  fontWeight: activeTab === 'users' ? '800' : '600',
+                  fontSize: '0.9rem',
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  transition: 'all 0.15s'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                  <Users size={18} color={activeTab === 'users' ? '#2563eb' : 'var(--text-muted)'} />
+                  <span>Usuarios y Cuentas</span>
+                </div>
+                <span style={{
+                  fontSize: '0.72rem',
+                  fontWeight: '700',
+                  padding: '0.15rem 0.45rem',
+                  borderRadius: '999px',
+                  backgroundColor: activeTab === 'users' ? '#dbeafe' : '#f1f5f9',
+                  color: activeTab === 'users' ? '#1e40af' : 'var(--text-muted)'
+                }}>
+                  {users.length}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveTab('carteras')}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '0.75rem 0.9rem',
+                  borderRadius: 'var(--radius-md)',
+                  border: activeTab === 'carteras' ? '1.5px solid #2563eb' : '1px solid transparent',
+                  backgroundColor: activeTab === 'carteras' ? '#eff6ff' : 'transparent',
+                  color: activeTab === 'carteras' ? '#1d4ed8' : 'var(--text-main)',
+                  fontWeight: activeTab === 'carteras' ? '800' : '600',
+                  fontSize: '0.9rem',
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  transition: 'all 0.15s'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                  <Briefcase size={18} color={activeTab === 'carteras' ? '#2563eb' : 'var(--text-muted)'} />
+                  <span>Carteras y Códigos</span>
+                </div>
+                <span style={{
+                  fontSize: '0.72rem',
+                  fontWeight: '700',
+                  padding: '0.15rem 0.45rem',
+                  borderRadius: '999px',
+                  backgroundColor: activeTab === 'carteras' ? '#dbeafe' : '#f1f5f9',
+                  color: activeTab === 'carteras' ? '#1e40af' : 'var(--text-muted)'
+                }}>
+                  {agentCodes.length}
+                </span>
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <div style={{ fontSize: '0.72rem', fontWeight: '800', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.6rem', paddingLeft: '0.5rem' }}>
+              Base de Datos y Datos
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+              <button
+                type="button"
+                onClick={() => setActiveTab('database')}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '0.75rem 0.9rem',
+                  borderRadius: 'var(--radius-md)',
+                  border: activeTab === 'database' ? '1.5px solid #2563eb' : '1px solid transparent',
+                  backgroundColor: activeTab === 'database' ? '#eff6ff' : 'transparent',
+                  color: activeTab === 'database' ? '#1d4ed8' : 'var(--text-main)',
+                  fontWeight: activeTab === 'database' ? '800' : '600',
+                  fontSize: '0.9rem',
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  transition: 'all 0.15s'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                  <Server size={18} color={activeTab === 'database' ? '#2563eb' : 'var(--text-muted)'} />
+                  <span>Base de Datos & Hasura</span>
+                </div>
+                <span style={{
+                  width: '8px',
+                  height: '8px',
+                  borderRadius: '50%',
+                  backgroundColor: backendStatus === 'connected' ? '#22c55e' : '#f59e0b'
+                }} />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveTab('import')}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '0.75rem 0.9rem',
+                  borderRadius: 'var(--radius-md)',
+                  border: activeTab === 'import' ? '1.5px solid #2563eb' : '1px solid transparent',
+                  backgroundColor: activeTab === 'import' ? '#eff6ff' : 'transparent',
+                  color: activeTab === 'import' ? '#1d4ed8' : 'var(--text-main)',
+                  fontWeight: activeTab === 'import' ? '800' : '600',
+                  fontSize: '0.9rem',
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  transition: 'all 0.15s'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                  <FileSpreadsheet size={18} color={activeTab === 'import' ? '#2563eb' : 'var(--text-muted)'} />
+                  <span>Importar Excel</span>
+                </div>
+                <span style={{
+                  fontSize: '0.72rem',
+                  fontWeight: '700',
+                  padding: '0.15rem 0.45rem',
+                  borderRadius: '999px',
+                  backgroundColor: activeTab === 'import' ? '#dbeafe' : '#f1f5f9',
+                  color: activeTab === 'import' ? '#1e40af' : 'var(--text-muted)'
+                }}>
+                  .xlsx
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveTab('export')}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '0.75rem 0.9rem',
+                  borderRadius: 'var(--radius-md)',
+                  border: activeTab === 'export' ? '1.5px solid #2563eb' : '1px solid transparent',
+                  backgroundColor: activeTab === 'export' ? '#eff6ff' : 'transparent',
+                  color: activeTab === 'export' ? '#1d4ed8' : 'var(--text-main)',
+                  fontWeight: activeTab === 'export' ? '800' : '600',
+                  fontSize: '0.9rem',
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  transition: 'all 0.15s'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                  <Download size={18} color={activeTab === 'export' ? '#2563eb' : 'var(--text-muted)'} />
+                  <span>Copia de Seguridad</span>
+                </div>
+              </button>
+            </div>
+          </div>
+
+          <div style={{
+            marginTop: 'auto',
+            padding: '0.85rem',
+            backgroundColor: '#f8fafc',
+            borderRadius: 'var(--radius-md)',
+            border: '1px solid #e2e8f0',
+            fontSize: '0.78rem',
+            color: 'var(--text-muted)'
+          }}>
+            <div style={{ fontWeight: '700', color: 'var(--text-main)', marginBottom: '0.2rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+              <ShieldCheck size={14} color="#16a34a" /> Datos Protegidos
+            </div>
+            Toda modificación se almacena de forma relacional en PostgreSQL.
+          </div>
+        </div>
+
+        {/* Right Content Panel */}
+        <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+
+      {/* TAB: SETEO DE USUARIOS Y ACCESOS */}
+      {activeTab === 'users' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+          
+          {/* Header Action Bar */}
+          <div className="card" style={{
+            backgroundColor: '#f8fafc',
+            border: '1px solid #e2e8f0',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: '1rem',
+            padding: '1.25rem 1.5rem'
+          }}>
+            <div>
+              <h3 style={{ margin: '0 0 0.3rem 0', fontSize: '1.25rem', color: 'var(--primary)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Users size={22} /> Seteo y Gestión de Usuarios del Sistema
+              </h3>
+              <p style={{ margin: 0, fontSize: '0.88rem', color: 'var(--text-muted)' }}>
+                Configura los usuarios autorizados. La cuenta principal de <strong>Santiago Alberto Morales Rodriguez</strong> guarda cambios permanentemente en PostgreSQL, y el usuario de prueba <strong>admin</strong> opera en modo Sandbox.
+              </p>
+            </div>
+
+            <button
+              className="btn btn-primary"
+              onClick={handleOpenAddUserModal}
+              style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: '700', padding: '0.65rem 1.25rem' }}
+            >
+              <UserPlus size={18} /> Agregar Nuevo Usuario
+            </button>
+          </div>
+
+          {/* Active Session Status Banner */}
+          <div style={{
+            backgroundColor: isDemo ? '#fffbeb' : '#f0fdf4',
+            border: isDemo ? '1.5px solid #fde68a' : '1.5px solid #bbf7d0',
+            borderRadius: 'var(--radius-md)',
+            padding: '1rem 1.5rem',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: '1rem',
+            boxShadow: '0 2px 6px rgba(0,0,0,0.03)'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+              <div style={{
+                width: '44px',
+                height: '44px',
+                borderRadius: '50%',
+                backgroundColor: isDemo ? '#d97706' : 'var(--primary)',
+                color: 'white',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontWeight: '800',
+                fontSize: '1.1rem',
+                flexShrink: 0
+              }}>
+                {currentUser?.avatar || 'U'}
+              </div>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+                  <h4 style={{ margin: 0, fontSize: '1.05rem', fontWeight: '800', color: isDemo ? '#92400e' : '#14532d' }}>
+                    Sesión Actual: {currentUser?.name}
+                  </h4>
+                  <span style={{
+                    fontSize: '0.75rem',
+                    padding: '0.15rem 0.55rem',
+                    borderRadius: '999px',
+                    fontWeight: '800',
+                    backgroundColor: isDemo ? '#fef3c7' : '#dcfce7',
+                    color: isDemo ? '#b45309' : '#15803d',
+                    border: isDemo ? '1px solid #fcd34d' : '1px solid #86efac'
+                  }}>
+                    {isDemo ? '🧪 Modo Sandbox (Sin Guardar en BD)' : '👑 Cuenta Principal (PostgreSQL Activo)'}
+                  </span>
+                </div>
+                <p style={{ margin: '0.2rem 0 0 0', fontSize: '0.85rem', color: isDemo ? '#b45309' : '#166534' }}>
+                  Usuario activo: <strong>{currentUser?.username || currentUser?.id}</strong> · Rol: {currentUser?.role}
+                </p>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              {isDemo ? (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => switchUser('santiagom2401')}
+                  style={{
+                    backgroundColor: '#166534',
+                    color: 'white',
+                    fontWeight: '700',
+                    fontSize: '0.85rem',
+                    padding: '0.5rem 1rem',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    border: 'none',
+                    borderRadius: 'var(--radius-sm)',
+                    cursor: 'pointer'
+                  }}
+                >
+                  <UserCheck size={16} /> Iniciar como Santiago Alberto Morales
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => switchUser('admin')}
+                  style={{
+                    backgroundColor: '#fef3c7',
+                    color: '#92400e',
+                    border: '1px solid #fcd34d',
+                    fontWeight: '700',
+                    fontSize: '0.85rem',
+                    padding: '0.5rem 1rem',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    borderRadius: 'var(--radius-sm)',
+                    cursor: 'pointer'
+                  }}
+                >
+                  <ShieldAlert size={16} /> Cambiar a Usuario de Prueba (admin)
+                </button>
+              )}
+
+              <button
+                type="button"
+                className="btn"
+                onClick={logout}
+                style={{
+                  backgroundColor: '#fee2e2',
+                  color: '#dc2626',
+                  border: '1px solid #fca5a5',
+                  fontWeight: '700',
+                  fontSize: '0.85rem',
+                  padding: '0.5rem 1rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.4rem',
+                  borderRadius: 'var(--radius-sm)',
+                  cursor: 'pointer'
+                }}
+                title="Cerrar sesión actual e ir a la página de login"
+              >
+                <LogOut size={16} /> Cerrar Sesión
+              </button>
+            </div>
+          </div>
+
+          {/* Grid of Users Cards */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: '1.5rem' }}>
+            {users.map((user) => {
+              const isSelected = user.id === currentUser?.id || user.username === currentUser?.username;
+              const isUserDemo = Boolean(user.isDemo);
+              const isPasswordVisible = Boolean(visiblePasswords[user.id]);
+
+              return (
+                <div
+                  key={user.id}
+                  className="card"
+                  style={{
+                    border: isSelected 
+                      ? (isUserDemo ? '2px solid #f59e0b' : '2px solid #16a34a') 
+                      : '1.5px solid var(--border)',
+                    backgroundColor: isSelected 
+                      ? (isUserDemo ? '#fffdfa' : '#fcfdfc') 
+                      : '#ffffff',
+                    position: 'relative',
+                    overflow: 'hidden',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: 'space-between',
+                    boxShadow: isSelected ? '0 4px 14px rgba(0,0,0,0.06)' : 'var(--shadow-sm)',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  <div>
+                    {/* Card Header */}
+                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '1.25rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
+                        <div style={{
+                          width: '48px',
+                          height: '48px',
+                          borderRadius: '12px',
+                          backgroundColor: isUserDemo ? '#d97706' : 'var(--primary)',
+                          color: 'white',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontWeight: '800',
+                          fontSize: '1.2rem',
+                          boxShadow: '0 2px 6px rgba(0,0,0,0.12)'
+                        }}>
+                          {user.avatar || 'U'}
+                        </div>
+                        <div>
+                          <h4 style={{ margin: 0, color: 'var(--text-main)', fontSize: '1.15rem', fontWeight: '800' }}>
+                            {user.name}
+                          </h4>
+                          <span style={{ fontSize: '0.82rem', color: isUserDemo ? '#b45309' : '#15803d', fontWeight: '700' }}>
+                            {user.role}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.3rem' }}>
+                        {user.isPrimary ? (
+                          <span style={{
+                            fontSize: '0.72rem',
+                            padding: '0.2rem 0.55rem',
+                            borderRadius: '999px',
+                            backgroundColor: '#eff6ff',
+                            color: '#1d4ed8',
+                            border: '1px solid #bfdbfe',
+                            fontWeight: '800',
+                            textTransform: 'uppercase',
+                            letterSpacing: '0.05em'
+                          }}>
+                            👑 Principal
+                          </span>
+                        ) : (
+                          <span style={{
+                            fontSize: '0.72rem',
+                            padding: '0.2rem 0.55rem',
+                            borderRadius: '999px',
+                            backgroundColor: isUserDemo ? '#fef3c7' : '#f1f5f9',
+                            color: isUserDemo ? '#b45309' : '#475569',
+                            border: isUserDemo ? '1px solid #fde68a' : '1px solid #cbd5e1',
+                            fontWeight: '800',
+                            textTransform: 'uppercase',
+                            letterSpacing: '0.05em'
+                          }}>
+                            {isUserDemo ? '🧪 Sandbox' : '👤 Usuario'}
+                          </span>
+                        )}
+
+                        {isSelected && (
+                          <span style={{
+                            fontSize: '0.72rem',
+                            padding: '0.15rem 0.5rem',
+                            borderRadius: '4px',
+                            backgroundColor: isUserDemo ? '#fed7aa' : '#bbf7d0',
+                            color: isUserDemo ? '#9a3412' : '#166534',
+                            fontWeight: '800',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.25rem'
+                          }}>
+                            <Check size={12} /> Activo Ahora
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Credentials Info Box */}
+                    <div style={{
+                      backgroundColor: '#f8fafc',
+                      borderRadius: 'var(--radius-sm)',
+                      border: '1px solid #e2e8f0',
+                      padding: '1rem',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '0.75rem',
+                      marginBottom: '1rem'
+                    }}>
+                      {/* Username */}
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.88rem' }}>
+                        <span style={{ color: 'var(--text-muted)', fontWeight: '600' }}>Usuario (Login):</span>
+                        <span style={{
+                          fontFamily: 'monospace',
+                          fontWeight: '800',
+                          fontSize: '0.95rem',
+                          color: 'var(--text-main)',
+                          backgroundColor: '#ffffff',
+                          padding: '0.15rem 0.55rem',
+                          borderRadius: '4px',
+                          border: '1px solid #cbd5e1'
+                        }}>
+                          {user.username || user.id}
+                        </span>
+                      </div>
+
+                      {/* Password */}
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.88rem' }}>
+                        <span style={{ color: 'var(--text-muted)', fontWeight: '600' }}>Contraseña:</span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                          <span style={{
+                            fontFamily: 'monospace',
+                            fontWeight: '800',
+                            fontSize: '0.95rem',
+                            color: isPasswordVisible ? 'var(--primary)' : 'var(--text-muted)',
+                            backgroundColor: '#ffffff',
+                            padding: '0.15rem 0.55rem',
+                            borderRadius: '4px',
+                            border: '1px solid #cbd5e1',
+                            letterSpacing: isPasswordVisible ? 'normal' : '0.15em'
+                          }}>
+                            {isPasswordVisible ? (user.password || '—') : '••••••••••'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => togglePasswordVisibility(user.id)}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              color: 'var(--text-muted)',
+                              cursor: 'pointer',
+                              padding: '2px 4px',
+                              display: 'flex',
+                              alignItems: 'center'
+                            }}
+                            title={isPasswordVisible ? 'Ocultar contraseña' : 'Ver contraseña'}
+                          >
+                            {isPasswordVisible ? <EyeOff size={16} /> : <Eye size={16} />}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Email */}
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.88rem' }}>
+                        <span style={{ color: 'var(--text-muted)', fontWeight: '600' }}>Email:</span>
+                        <span style={{ fontWeight: '600', color: 'var(--text-main)' }}>{user.email || '—'}</span>
+                      </div>
+
+                      {/* Database Behavior */}
+                      <div style={{ borderTop: '1px dashed #cbd5e1', paddingTop: '0.6rem', marginTop: '0.2rem' }}>
+                        <span style={{ fontSize: '0.78rem', fontWeight: '700', textTransform: 'uppercase', color: isUserDemo ? '#b45309' : '#15803d', display: 'block', marginBottom: '0.2rem' }}>
+                          {isUserDemo ? '⚡ Comportamiento: Modo Sandbox' : '💾 Comportamiento: Base de Datos Real'}
+                        </span>
+                        <p style={{ margin: 0, fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.35 }}>
+                          {isUserDemo
+                            ? 'Permite consultar todos los datos y probar funciones en memoria. Ninguna modificación se guarda en PostgreSQL.'
+                            : 'Acceso total y permanente. Todas las pólizas, cobros, clientes y movimientos se guardan en la base de datos PostgreSQL.'}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Card Actions */}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', borderTop: '1px solid var(--border)', paddingTop: '1rem', marginTop: '0.5rem' }}>
+                    <div>
+                      {isSelected ? (
+                        <span style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '0.35rem',
+                          color: isUserDemo ? '#b45309' : '#16a34a',
+                          fontWeight: '800',
+                          fontSize: '0.86rem'
+                        }}>
+                          <CheckCircle2 size={16} /> Sesión Activa
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          onClick={() => switchUser(user.id)}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '0.4rem',
+                            fontSize: '0.84rem',
+                            fontWeight: '700',
+                            padding: '0.45rem 0.9rem'
+                          }}
+                        >
+                          <LogIn size={15} /> Iniciar como {user.name.split(' ')[0]}
+                        </button>
+                      )}
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => handleOpenEditUserModal(user)}
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '0.3rem',
+                          fontSize: '0.82rem',
+                          fontWeight: '600',
+                          padding: '0.45rem 0.75rem',
+                          border: '1px solid var(--border)',
+                          backgroundColor: '#ffffff'
+                        }}
+                        title="Editar datos y contraseña"
+                      >
+                        <Edit size={14} /> Editar
+                      </button>
+
+                      {!user.isPrimary && (
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={() => handleDeleteUser(user.id, user.username, user.name)}
+                          style={{
+                            padding: '0.45rem 0.6rem',
+                            color: '#dc2626',
+                            backgroundColor: '#fee2e2',
+                            border: '1px solid #fca5a5'
+                          }}
+                          title="Eliminar usuario"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Interactive Credential Tester / Login Validator */}
+          <div className="card" style={{
+            border: '1px solid var(--border)',
+            backgroundColor: '#ffffff',
+            padding: '1.5rem',
+            marginTop: '0.5rem'
+          }}>
+            <div style={{ marginBottom: '1.25rem' }}>
+              <h3 style={{ margin: '0 0 0.3rem 0', fontSize: '1.15rem', color: 'var(--primary)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Lock size={20} /> Probar Inicio de Sesión y Validación de Credenciales
+              </h3>
+              <p style={{ margin: 0, fontSize: '0.88rem', color: 'var(--text-muted)' }}>
+                Ingresa cualquier usuario y contraseña para probar el validador de acceso instantáneamente:
+              </p>
+            </div>
+
+            <form onSubmit={handleTestLoginSubmit} style={{ display: 'flex', gap: '1rem', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+              <div style={{ flex: 1, minWidth: '220px' }}>
+                <label style={{ fontSize: '0.8rem', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', display: 'block', marginBottom: '0.35rem' }}>
+                  Nombre de Usuario (Login)
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Ej. Santiagom2401 o admin"
+                  value={testLoginForm.username}
+                  onChange={e => setTestLoginForm({ ...testLoginForm, username: e.target.value })}
+                  style={{ width: '100%', padding: '0.6rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', fontWeight: '600' }}
+                />
+              </div>
+
+              <div style={{ flex: 1, minWidth: '220px' }}>
+                <label style={{ fontSize: '0.8rem', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', display: 'block', marginBottom: '0.35rem' }}>
+                  Contraseña
+                </label>
+                <input
+                  type="password"
+                  required
+                  placeholder="Ej. Shagy962401 o admin"
+                  value={testLoginForm.password}
+                  onChange={e => setTestLoginForm({ ...testLoginForm, password: e.target.value })}
+                  style={{ width: '100%', padding: '0.6rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}
+                />
+              </div>
+
+              <button
+                type="submit"
+                className="btn btn-primary"
+                style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: '700', padding: '0.65rem 1.35rem', height: '42px' }}
+              >
+                <LogIn size={17} /> Validar y Conectar
+              </button>
+            </form>
+
+            {testLoginResult && (
+              <div style={{
+                marginTop: '1.25rem',
+                padding: '0.85rem 1.15rem',
+                borderRadius: 'var(--radius-sm)',
+                backgroundColor: testLoginResult.success ? '#f0fdf4' : '#fef2f2',
+                border: testLoginResult.success ? '1px solid #bbf7d0' : '1px solid #fecaca',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.75rem'
+              }}>
+                {testLoginResult.success ? (
+                  <>
+                    <CheckCircle2 size={20} color="#15803d" />
+                    <div>
+                      <strong style={{ color: '#15803d', display: 'block', fontSize: '0.92rem' }}>
+                        ¡Acceso Correcto! Sesión iniciada con éxito
+                      </strong>
+                      <span style={{ fontSize: '0.84rem', color: '#166534' }}>
+                        Conectado como <strong>{testLoginResult.user?.name}</strong> ({testLoginResult.user?.role}). Modo: {testLoginResult.user?.isDemo ? '🧪 Sandbox' : '👑 Producción'}.
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <AlertTriangle size={20} color="#dc2626" />
+                    <div>
+                      <strong style={{ color: '#dc2626', display: 'block', fontSize: '0.92rem' }}>
+                        Error de Autenticación
+                      </strong>
+                      <span style={{ fontSize: '0.84rem', color: '#991b1b' }}>
+                        {testLoginResult.message}
+                      </span>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
+        </div>
+      )}
 
       {/* TAB 0: CARTERAS Y CÓDIGOS DE AGENTES */}
       {activeTab === 'carteras' && (
@@ -1347,24 +2229,330 @@ const Settings = ({
         </div>
       )}
 
-      {/* TAB 3: EXPORTAR */}
+      {/* TAB 3: COPIA DE SEGURIDAD / EXPORTAR */}
       {activeTab === 'export' && (
-        <div className="card" style={{ padding: '2rem' }}>
-          <div style={{ maxWidth: '600px' }}>
-            <h3 style={{ fontSize: '1.3rem', color: 'var(--primary)', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <Download size={22} /> Exportación y Respaldo Completo
-            </h3>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem', marginBottom: '1.5rem' }}>
-              Descarga un archivo Excel (.xlsx) consolidado con todos los clientes, pólizas, cobros y aseguradoras guardadas en PostgreSQL.
-            </p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+          <div className="card" style={{ padding: '2rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem', borderBottom: '1px solid var(--border)', paddingBottom: '1rem', flexWrap: 'wrap', gap: '1rem' }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: '1.35rem', color: 'var(--primary)', display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: '800' }}>
+                  <Download size={24} /> Copia de Seguridad y Respaldo de Datos
+                </h3>
+                <p style={{ margin: '0.35rem 0 0', color: 'var(--text-muted)', fontSize: '0.92rem' }}>
+                  Genera y descarga un respaldo completo de la base de datos de <strong>Santiago Morales y Asociados, S.R.L.</strong>
+                </p>
+              </div>
+            </div>
 
-            <button
-              className="btn btn-primary"
-              onClick={handleExportBackup}
-              style={{ padding: '0.75rem 1.5rem', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1rem' }}
-            >
-              <Download size={18} /> Descargar Respaldo Completo en Excel (.xlsx)
-            </button>
+            {/* Summary of Data to Export */}
+            <div style={{ marginBottom: '1.75rem' }}>
+              <h4 style={{ fontSize: '0.85rem', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
+                Resumen de Registros a Respaldar:
+              </h4>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.75rem' }}>
+                <div style={{ padding: '0.85rem', backgroundColor: '#f8fafc', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.4rem', fontWeight: '800', color: 'var(--primary)' }}>{clients.length}</div>
+                  <div style={{ fontSize: '0.78rem', fontWeight: '600', color: 'var(--text-muted)' }}>Clientes</div>
+                </div>
+                <div style={{ padding: '0.85rem', backgroundColor: '#f8fafc', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.4rem', fontWeight: '800', color: 'var(--primary)' }}>{policies.length}</div>
+                  <div style={{ fontSize: '0.78rem', fontWeight: '600', color: 'var(--text-muted)' }}>Pólizas</div>
+                </div>
+                <div style={{ padding: '0.85rem', backgroundColor: '#f8fafc', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.4rem', fontWeight: '800', color: 'var(--primary)' }}>{payments.length}</div>
+                  <div style={{ fontSize: '0.78rem', fontWeight: '600', color: 'var(--text-muted)' }}>Recibos de Cobro</div>
+                </div>
+                <div style={{ padding: '0.85rem', backgroundColor: '#f8fafc', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.4rem', fontWeight: '800', color: 'var(--primary)' }}>{companies.length}</div>
+                  <div style={{ fontSize: '0.78rem', fontWeight: '600', color: 'var(--text-muted)' }}>Aseguradoras</div>
+                </div>
+                <div style={{ padding: '0.85rem', backgroundColor: '#f8fafc', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.4rem', fontWeight: '800', color: 'var(--primary)' }}>{claims.length}</div>
+                  <div style={{ fontSize: '0.78rem', fontWeight: '600', color: 'var(--text-muted)' }}>Siniestros</div>
+                </div>
+                <div style={{ padding: '0.85rem', backgroundColor: '#f8fafc', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.4rem', fontWeight: '800', color: 'var(--primary)' }}>{agentCodes.length}</div>
+                  <div style={{ fontSize: '0.78rem', fontWeight: '600', color: 'var(--text-muted)' }}>Códigos Cartera</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Export Message Alert */}
+            {exportMessage && (
+              <div style={{
+                padding: '1rem 1.25rem',
+                borderRadius: 'var(--radius-md)',
+                marginBottom: '1.5rem',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.75rem',
+                backgroundColor: exportMessage.type === 'error' ? '#fee2e2' : exportMessage.type === 'success' ? '#f0fdf4' : '#eff6ff',
+                border: exportMessage.type === 'error' ? '1px solid #fecaca' : exportMessage.type === 'success' ? '1px solid #bbf7d0' : '1px solid #bfdbfe',
+                color: exportMessage.type === 'error' ? '#991b1b' : exportMessage.type === 'success' ? '#166534' : '#1e40af',
+                fontSize: '0.92rem',
+                fontWeight: '600'
+              }}>
+                {exportMessage.type === 'error' && <AlertTriangle size={20} color="#ef4444" style={{ flexShrink: 0 }} />}
+                {exportMessage.type === 'success' && <CheckCircle2 size={20} color="#16a34a" style={{ flexShrink: 0 }} />}
+                {exportMessage.type === 'info' && <Loader2 size={20} className="animate-spin" color="#2563eb" style={{ flexShrink: 0 }} />}
+                <span>{exportMessage.text}</span>
+              </div>
+            )}
+
+            {/* Action Cards */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1.25rem' }}>
+              {/* Option 1: Excel Backup */}
+              <div style={{
+                padding: '1.5rem',
+                backgroundColor: '#ffffff',
+                border: '1.5px solid #22c55e',
+                borderRadius: 'var(--radius-md)',
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'space-between',
+                gap: '1rem',
+                boxShadow: '0 4px 12px rgba(34, 197, 94, 0.08)'
+              }}>
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                    <FileSpreadsheet size={22} color="#16a34a" />
+                    <h4 style={{ margin: 0, fontSize: '1.1rem', color: '#166534', fontWeight: '800' }}>
+                      Respaldo en Excel (.xlsx)
+                    </h4>
+                  </div>
+                  <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                    Genera un libro con hojas individuales para <strong>Pólizas, Clientes, Cobros, Siniestros y Aseguradoras</strong>. Formato recomendado para análisis y reportes.
+                  </p>
+                </div>
+
+                <button
+                  className="btn"
+                  onClick={handleExportBackup}
+                  disabled={isExporting}
+                  style={{
+                    backgroundColor: '#16a34a',
+                    color: 'white',
+                    padding: '0.8rem 1.25rem',
+                    fontWeight: '700',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '0.5rem',
+                    borderRadius: 'var(--radius-md)',
+                    border: 'none',
+                    cursor: isExporting ? 'wait' : 'pointer'
+                  }}
+                >
+                  {isExporting ? (
+                    <>
+                      <Loader2 size={18} className="animate-spin" />
+                      <span>Generando Excel...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Download size={18} />
+                      <span>Descargar Respaldo Excel</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Option 2: JSON Backup */}
+              <div style={{
+                padding: '1.5rem',
+                backgroundColor: '#ffffff',
+                border: '1.5px solid #3b82f6',
+                borderRadius: 'var(--radius-md)',
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'space-between',
+                gap: '1rem',
+                boxShadow: '0 4px 12px rgba(59, 130, 246, 0.08)'
+              }}>
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                    <Database size={22} color="#2563eb" />
+                    <h4 style={{ margin: 0, fontSize: '1.1rem', color: '#1d4ed8', fontWeight: '800' }}>
+                      Respaldo Estructurado (JSON)
+                    </h4>
+                  </div>
+                  <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                    Copia de seguridad técnica completa en formato JSON para restauraciones directas, desarrollos o migraciones entre bases de datos.
+                  </p>
+                </div>
+
+                <button
+                  className="btn"
+                  onClick={handleExportJsonBackup}
+                  style={{
+                    backgroundColor: '#2563eb',
+                    color: 'white',
+                    padding: '0.8rem 1.25rem',
+                    fontWeight: '700',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '0.5rem',
+                    borderRadius: 'var(--radius-md)',
+                    border: 'none'
+                  }}
+                >
+                  <Download size={18} />
+                  <span>Descargar Respaldo JSON</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+        </div> {/* Close Right Content Panel */}
+      </div> {/* Close Main Two-Column Grid */}
+
+      {/* Create / Edit User Modal */}
+      {showUserModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000,
+          padding: '1rem'
+        }}>
+          <div className="card" style={{ width: '100%', maxWidth: '540px', backgroundColor: 'white', maxHeight: '90vh', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem', borderBottom: '1px solid var(--border)', paddingBottom: '0.75rem' }}>
+              <h3 style={{ margin: 0, color: 'var(--primary)', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.2rem', fontWeight: '800' }}>
+                <Users size={20} /> {editingUser ? 'Editar Credenciales de Usuario' : 'Crear Nuevo Usuario'}
+              </h3>
+              <button onClick={() => setShowUserModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>
+                <X size={22} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveUserSubmit}>
+              <div style={{ marginBottom: '1rem' }}>
+                <label style={{ fontSize: '0.8rem', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', display: 'block', marginBottom: '0.35rem' }}>
+                  Nombre Completo *
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Ej. Santiago Alberto Morales Rodriguez"
+                  value={userForm.name}
+                  onChange={e => setUserForm({ ...userForm, name: e.target.value })}
+                  style={{ width: '100%', padding: '0.6rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', fontWeight: '600' }}
+                />
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                <div>
+                  <label style={{ fontSize: '0.8rem', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', display: 'block', marginBottom: '0.35rem' }}>
+                    Usuario (Login) *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Ej. Santiagom2401"
+                    value={userForm.username}
+                    onChange={e => setUserForm({ ...userForm, username: e.target.value })}
+                    style={{ width: '100%', padding: '0.6rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', fontWeight: '700', fontFamily: 'monospace' }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: '0.8rem', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', display: 'block', marginBottom: '0.35rem' }}>
+                    Contraseña *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Ej. Shagy962401"
+                    value={userForm.password}
+                    onChange={e => setUserForm({ ...userForm, password: e.target.value })}
+                    style={{ width: '100%', padding: '0.6rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', fontWeight: '700', fontFamily: 'monospace' }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                <div>
+                  <label style={{ fontSize: '0.8rem', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', display: 'block', marginBottom: '0.35rem' }}>
+                    Rol / Cargo
+                  </label>
+                  <select
+                    value={userForm.role}
+                    onChange={e => setUserForm({ ...userForm, role: e.target.value })}
+                    style={{ width: '100%', padding: '0.6rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', fontWeight: '600' }}
+                  >
+                    <option value="Administrador Principal">Administrador Principal</option>
+                    <option value="Agente Asociado">Agente Asociado</option>
+                    <option value="Oficial de Operaciones">Oficial de Operaciones</option>
+                    <option value="Invitado / Modo Sandbox">Invitado / Modo Sandbox</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label style={{ fontSize: '0.8rem', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', display: 'block', marginBottom: '0.35rem' }}>
+                    Tipo de Cuenta
+                  </label>
+                  <select
+                    value={userForm.isDemo ? 'demo' : 'prod'}
+                    onChange={e => setUserForm({ ...userForm, isDemo: e.target.value === 'demo' })}
+                    style={{ width: '100%', padding: '0.6rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', fontWeight: '700', color: userForm.isDemo ? '#b45309' : '#15803d' }}
+                    disabled={editingUser?.isPrimary}
+                  >
+                    <option value="prod">🟢 Producción (Guarda en BD)</option>
+                    <option value="demo">🟡 Sandbox (Prueba sin guardar)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div style={{ marginBottom: '1rem' }}>
+                <label style={{ fontSize: '0.8rem', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', display: 'block', marginBottom: '0.35rem' }}>
+                  Correo Electrónico
+                </label>
+                <input
+                  type="email"
+                  placeholder="Ej. santiago@moralesyasoc.com"
+                  value={userForm.email}
+                  onChange={e => setUserForm({ ...userForm, email: e.target.value })}
+                  style={{ width: '100%', padding: '0.6rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}
+                />
+              </div>
+
+              <div style={{ marginBottom: '1.5rem' }}>
+                <label style={{ fontSize: '0.8rem', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', display: 'block', marginBottom: '0.35rem' }}>
+                  Descripción / Notas de Acceso
+                </label>
+                <textarea
+                  rows={2}
+                  placeholder="Detalles sobre permisos o responsabilidades..."
+                  value={userForm.description}
+                  onChange={e => setUserForm({ ...userForm, description: e.target.value })}
+                  style={{ width: '100%', padding: '0.6rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', resize: 'vertical' }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem' }}>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setShowUserModal(false)}
+                  style={{ border: '1px solid var(--border)', backgroundColor: '#f8fafc' }}
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: '700' }}
+                >
+                  <Check size={16} /> {editingUser ? 'Guardar Cambios de Usuario' : 'Crear Usuario'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

@@ -5,7 +5,7 @@
  */
 
 import { executeGraphQL } from './hasuraClient';
-import { formatMoney, formatDateToDDMMYYYY, getNextRenewalDate } from '../utils/policyHelpers';
+import { formatMoney, formatDateToDDMMYYYY, getNextRenewalDate, getLaColonialRamoInfo } from '../utils/policyHelpers';
 
 // ─── GraphQL Master Query ───────────────────────────────────────────────────
 
@@ -41,6 +41,7 @@ export const GET_ALL_DATA_QUERY = `
       frecuencia_pago
       monto
       prima_anual
+      porcentaje_comision
       status
       created_at
     }
@@ -180,29 +181,21 @@ export const normalizeClientFromHasura = (c) => {
   };
 };
 
+export const formatPolicyNumberLaColonial = (numStr, insurer = '') => {
+  if (!numStr) return '';
+  const digits = String(numStr).replace(/\D/g, '');
+  const insUpper = String(insurer || '').toUpperCase();
+  // Formato oficial La Colonial: 0-0-000-0000000 (12 dígitos)
+  if (digits.length === 12 && (insUpper.includes('COLONIAL') || !insurer || digits.startsWith('12') || digits.startsWith('1'))) {
+    return `${digits.slice(0, 1)}-${digits.slice(1, 2)}-${digits.slice(2, 5)}-${digits.slice(5)}`;
+  }
+  return String(numStr);
+};
+
 export const normalizePolicyFromHasura = (p, clientMap = {}, movementsMap = {}) => {
   const clientName = clientMap[p.cliente_id] || `Cliente #${p.cliente_id}`;
-  const policyNum = p.numero_poliza || `POL-${String(p.id).padStart(3, '0')}`;
+  let rawPolicyNum = p.numero_poliza || `POL-${String(p.id).padStart(3, '0')}`;
   
-  // Format ramo / type cleanly
-  let type = p.ramo || 'General';
-  if (type.toLowerCase().includes('auto') || type.toLowerCase().includes('vehiculo')) type = 'Auto';
-  else if (type.toLowerCase().includes('medico') || type.toLowerCase().includes('salud') || type.toLowerCase().includes('aetna')) type = 'Salud';
-  else if (type.toLowerCase().includes('vida')) type = 'Vida';
-  else if (type.toLowerCase().includes('incendio') || type.toLowerCase().includes('propiedad')) type = 'Incendio';
-  else if (type.toLowerCase().includes('responsabilidad')) type = 'Responsabilidad Civil';
-  else type = p.ramo.replace(/^\d+\s*-?\s*/, '').trim() || 'General';
-
-  // Frequency
-  let frequency = 'Anual';
-  if (p.frecuencia_pago) {
-    const fLower = p.frecuencia_pago.toLowerCase();
-    if (fLower.includes('mensual')) frequency = 'Mensual';
-    else if (fLower.includes('trimestral')) frequency = 'Trimestral';
-    else if (fLower.includes('semestral')) frequency = 'Semestral';
-    else frequency = 'Anual';
-  }
-
   // Insurer normalization
   let rawInsurer = String(p.compania || '').trim();
   let insurer = 'La Colonial de Seguros';
@@ -224,15 +217,62 @@ export const normalizePolicyFromHasura = (p, clientMap = {}, movementsMap = {}) 
     insurer = rawInsurer;
   }
 
+  const policyNum = formatPolicyNumberLaColonial(rawPolicyNum, insurer);
+
+  // Auto-resolve ramo and category by denomination for La Colonial
+  const colonialRamo = (insurer === 'La Colonial de Seguros' || policyNum.startsWith('1-2-')) ? getLaColonialRamoInfo(policyNum) : null;
+
+  // Format ramo / type cleanly
+  let type = colonialRamo ? colonialRamo.category : (p.ramo || 'General');
+  if (!colonialRamo) {
+    if (type.toLowerCase().includes('auto') || type.toLowerCase().includes('vehiculo')) type = 'Auto';
+    else if (type.toLowerCase().includes('medico') || type.toLowerCase().includes('salud') || type.toLowerCase().includes('aetna')) type = 'Salud';
+    else if (type.toLowerCase().includes('vida')) type = 'Vida';
+    else if (type.toLowerCase().includes('incendio') || type.toLowerCase().includes('propiedad')) type = 'Incendio';
+    else if (type.toLowerCase().includes('responsabilidad')) type = 'Responsabilidad Civil';
+    else if (type.toLowerCase().includes('transporte') || type.toLowerCase().includes('carga')) type = 'Transporte de Carga';
+    else if (type.toLowerCase().includes('fianza') || type.toLowerCase().includes('fidelidad')) type = 'Fidelidad / Fianzas';
+    else type = (p.ramo || '').replace(/^\d+\s*-?\s*/, '').trim() || 'General';
+  }
+
+  // Frequency
+  let frequency = 'Anual';
+  if (p.frecuencia_pago) {
+    const fLower = p.frecuencia_pago.toLowerCase();
+    if (fLower.includes('mensual')) frequency = 'Mensual';
+    else if (fLower.includes('trimestral')) frequency = 'Trimestral';
+    else if (fLower.includes('semestral')) frequency = 'Semestral';
+    else frequency = 'Anual';
+  }
+
   const isRaquel = (p.cartera && p.cartera.includes('Raquel')) || p.codigo_agente === '897' || rawInsurer === '897';
   const cartera = isRaquel ? 'Raquel Rodríguez' : (p.cartera || 'Santiago Morales y Asociados, S.R.L.');
   const agentCode = isRaquel ? '897' : (p.codigo_agente || (insurer === 'Humano Seguros' ? '76713' : '8055'));
 
-  const movements = movementsMap[p.id] || [];
+  const movements = (movementsMap[p.id] || []).map(m => ({
+    id: m.id,
+    date: m.date || m.fecha || '2025-01-01',
+    type: m.type || m.tipo || 'Movimiento',
+    description: m.description || m.descripcion || '',
+    evidence: m.evidence || m.evidencia || 'N/A',
+    rawMov: m
+  }));
+
+  const hasCancellationMovement = movements.some(m => 
+    (m.type && m.type.toLowerCase().includes('cancel')) ||
+    (m.description && m.description.toLowerCase().includes('cancel'))
+  );
+
+  let initialStatus = p.status || 'Active';
+  if (hasCancellationMovement || p.status === 'Cancelled' || p.status === 'Cancelada') {
+    initialStatus = 'Cancelled';
+  }
 
   const startDate = p.inicio_poliza || '2025-01-01';
   const lastRenewalDate = p.vigencia_inicio || p.inicio_poliza || '2025-01-01';
   const endDate = p.vigencia_fin || getNextRenewalDate(lastRenewalDate, frequency);
+
+  const ramoDisplay = colonialRamo ? colonialRamo.label : (p.ramo ? `Ramo: ${p.ramo}` : 'Cobertura estándar');
 
   return {
     id: policyNum,
@@ -243,6 +283,7 @@ export const normalizePolicyFromHasura = (p, clientMap = {}, movementsMap = {}) 
     insurer,
     cartera,
     agentCode,
+    status: initialStatus,
     startDate,
     lastRenewalDate,
     endDate,
@@ -250,8 +291,12 @@ export const normalizePolicyFromHasura = (p, clientMap = {}, movementsMap = {}) 
     renewalFrequency: frequency,
     insuredAmount: p.monto ? formatMoney(Number(p.monto)) : 'RD$ 0',
     amount: p.prima_anual ? formatMoney(Number(p.prima_anual)) : 'RD$ 0',
-    details: p.ramo ? `Ramo: ${p.ramo}` : 'Cobertura estándar',
+    commissionRate: p.porcentaje_comision !== null && p.porcentaje_comision !== undefined ? Number(p.porcentaje_comision) : 15.0,
+    porcentajeComision: p.porcentaje_comision !== null && p.porcentaje_comision !== undefined ? Number(p.porcentaje_comision) : 15.0,
+    details: p.renovacion || ramoDisplay,
     movements,
+    createdAt: p.created_at || null,
+    rawPolicy: p,
   };
 };
 
@@ -565,10 +610,11 @@ export const insertPolicyHasura = async (policy, isDemo = false) => {
   `;
   const cleanAmount = parseFloat(String(policy.amount || '0').replace(/[^0-9.-]+/g, '')) || 0;
   const cleanInsured = parseFloat(String(policy.insuredAmount || '0').replace(/[^0-9.-]+/g, '')) || 0;
+  const formattedPolicyId = formatPolicyNumberLaColonial(policy.id || policy.numeroPoliza, policy.insurer);
 
   return executeGraphQL(mutation, {
     object: {
-      numero_poliza: policy.id,
+      numero_poliza: formattedPolicyId,
       cliente_id: policy.clienteId || null,
       compania: policy.insurer,
       cartera: policy.cartera || 'Santiago Morales y Asociados, S.R.L.',
@@ -580,6 +626,7 @@ export const insertPolicyHasura = async (policy, isDemo = false) => {
       frecuencia_pago: policy.renewalFrequency,
       monto: cleanInsured,
       prima_anual: cleanAmount,
+      porcentaje_comision: parseFloat(policy.commissionRate ?? policy.porcentajeComision ?? 15.0) || 0,
       status: policy.status || 'Active',
     }
   }, { isDemo });
@@ -596,9 +643,10 @@ export const updatePolicyHasura = async (id, policy, isDemo = false) => {
   `;
   const cleanAmount = parseFloat(String(policy.amount || '0').replace(/[^0-9.-]+/g, '')) || 0;
   const cleanInsured = parseFloat(String(policy.insuredAmount || '0').replace(/[^0-9.-]+/g, '')) || 0;
+  const formattedPolicyId = formatPolicyNumberLaColonial(policy.id || policy.numeroPoliza, policy.insurer);
 
   const setObj = {
-    numero_poliza: policy.id || policy.numeroPoliza,
+    numero_poliza: formattedPolicyId,
     compania: policy.insurer,
     cartera: policy.cartera || 'Santiago Morales y Asociados, S.R.L.',
     codigo_agente: policy.agentCode || (policy.cartera?.includes('Raquel') ? '897' : '8055'),
@@ -614,8 +662,71 @@ export const updatePolicyHasura = async (id, policy, isDemo = false) => {
   if (policy.endDate) setObj.vigencia_fin = policy.endDate;
   if (policy.status) setObj.status = policy.status;
   if (policy.details) setObj.renovacion = policy.details;
+  if (policy.commissionRate !== undefined || policy.porcentajeComision !== undefined) {
+    setObj.porcentaje_comision = parseFloat(policy.commissionRate ?? policy.porcentajeComision ?? 15.0) || 0;
+  }
 
   return executeGraphQL(mutation, { id, set: setObj }, { isDemo });
+};
+
+/**
+ * Elimina una póliza y sus registros asociados de Hasura GraphQL / PostgreSQL
+ */
+export const deletePolicyHasura = async (policyOrId, isDemo = false) => {
+  let rawId = null;
+  let policyNum = null;
+
+  if (typeof policyOrId === 'object' && policyOrId !== null) {
+    rawId = policyOrId.rawId || policyOrId.dbId || policyOrId.id;
+    policyNum = policyOrId.id || policyOrId.numeroPoliza || policyOrId.numero_poliza;
+  } else {
+    rawId = policyOrId;
+    policyNum = String(policyOrId);
+  }
+
+  const isNumericId = typeof rawId === 'number' || (typeof rawId === 'string' && /^\d+$/.test(rawId));
+  const numericId = isNumericId ? parseInt(rawId, 10) : null;
+
+  try {
+    if (numericId !== null) {
+      // 1. Eliminar movimientos asociados
+      await executeGraphQL(`
+        mutation DeleteMovs($pId: bigint!) {
+          delete_movimientos_poliza(where: { poliza_id: { _eq: $pId } }) { affected_rows }
+        }
+      `, { pId: numericId }, { isDemo });
+
+      // 2. Eliminar cobros asociados
+      await executeGraphQL(`
+        mutation DeleteCobros($pId: bigint!) {
+          delete_cobros(where: { poliza_id: { _eq: $pId } }) { affected_rows }
+        }
+      `, { pId: numericId }, { isDemo });
+
+      // 3. Eliminar siniestros asociados
+      await executeGraphQL(`
+        mutation DeleteSiniestros($pId: bigint!) {
+          delete_siniestros(where: { poliza_id: { _eq: $pId } }) { affected_rows }
+        }
+      `, { pId: numericId }, { isDemo });
+
+      // 4. Eliminar la póliza por PK
+      return await executeGraphQL(`
+        mutation DeletePolicyPk($pId: bigint!) {
+          delete_polizas_by_pk(id: $pId) { id numero_poliza }
+        }
+      `, { pId: numericId }, { isDemo });
+    } else if (policyNum) {
+      return await executeGraphQL(`
+        mutation DeletePolicyByNumber($pNum: String!) {
+          delete_polizas(where: { numero_poliza: { _eq: $pNum } }) { affected_rows }
+        }
+      `, { pNum: policyNum }, { isDemo });
+    }
+  } catch (err) {
+    console.warn('Error deleting policy from Hasura:', err);
+    throw err;
+  }
 };
 
 // AGENTES CODIGOS POR COMPANIA
@@ -703,16 +814,7 @@ export const insertCobroHasura = async (cobro, isDemo = false) => {
   }, { isDemo });
 };
 
-export const updateCobroHasura = async (id, cobro, isDemo = false) => {
-  const mutation = `
-    mutation UpdateCobro($id: bigint!, $set: cobros_set_input!) {
-      update_cobros_by_pk(pk_columns: { id: $id }, _set: $set) {
-        id
-        status
-        comprobante
-      }
-    }
-  `;
+export const updateCobroHasura = async (idOrReceipt, cobro, isDemo = false) => {
   const cleanAmount = parseFloat(String(cobro.amount || cobro.amountNum || '0').replace(/[^0-9.-]+/g, '')) || undefined;
 
   const setObj = {};
@@ -726,18 +828,51 @@ export const updateCobroHasura = async (id, cobro, isDemo = false) => {
   }
   if (cobro.notes !== undefined) setObj.notas = cobro.notes;
 
-  return executeGraphQL(mutation, { id, set: setObj }, { isDemo });
+  const isNumericId = typeof idOrReceipt === 'number' || (typeof idOrReceipt === 'string' && /^\d+$/.test(idOrReceipt));
+  if (isNumericId) {
+    const mutation = `
+      mutation UpdateCobro($id: bigint!, $set: cobros_set_input!) {
+        update_cobros_by_pk(pk_columns: { id: $id }, _set: $set) {
+          id
+          status
+          comprobante
+        }
+      }
+    `;
+    return executeGraphQL(mutation, { id: parseInt(idOrReceipt, 10), set: setObj }, { isDemo });
+  } else {
+    const mutation = `
+      mutation UpdateCobroByReceipt($receiptNo: String!, $set: cobros_set_input!) {
+        update_cobros(where: { numero_recibo: { _eq: $receiptNo } }, _set: $set) {
+          affected_rows
+        }
+      }
+    `;
+    return executeGraphQL(mutation, { receiptNo: String(idOrReceipt), set: setObj }, { isDemo });
+  }
 };
 
-export const deleteCobroHasura = async (id, isDemo = false) => {
-  const mutation = `
-    mutation DeleteCobro($id: bigint!) {
-      delete_cobros_by_pk(id: $id) {
-        id
+export const deleteCobroHasura = async (idOrReceipt, isDemo = false) => {
+  const isNumericId = typeof idOrReceipt === 'number' || (typeof idOrReceipt === 'string' && /^\d+$/.test(idOrReceipt));
+  if (isNumericId) {
+    const mutation = `
+      mutation DeleteCobro($id: bigint!) {
+        delete_cobros_by_pk(id: $id) {
+          id
+        }
       }
-    }
-  `;
-  return executeGraphQL(mutation, { id }, { isDemo });
+    `;
+    return executeGraphQL(mutation, { id: parseInt(idOrReceipt, 10) }, { isDemo });
+  } else {
+    const mutation = `
+      mutation DeleteCobroByReceipt($receiptNo: String!) {
+        delete_cobros(where: { numero_recibo: { _eq: $receiptNo } }) {
+          affected_rows
+        }
+      }
+    `;
+    return executeGraphQL(mutation, { receiptNo: String(idOrReceipt) }, { isDemo });
+  }
 };
 
 // SINIESTROS

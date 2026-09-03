@@ -1,20 +1,173 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { Bell, Search, Menu, RefreshCw, UserCheck, ChevronDown, Check, ShieldAlert, Database, Wifi, WifiOff, X } from 'lucide-react';
+import { 
+  Bell, Search, Menu, RefreshCw, UserCheck, ChevronDown, Check, ShieldAlert, 
+  X, Clock, AlertTriangle, FileText, CheckCheck, FileCheck, ArrowRight, DollarSign, Shield, LogOut, CheckCircle, XCircle 
+} from 'lucide-react';
 import { useUser } from '../context/UserContext';
-import { useBackend } from '../context/BackendContext';
-import HasuraSettingsModal from './HasuraSettingsModal';
+import { formatDateToDDMMYYYY, formatMoney, calculatePolicyStatus, getPolicyPaymentStats } from '../utils/policyHelpers';
 
-const Header = ({ onToggleSidebar, showMenuButton, clients = [], policies = [], onNavigate, onNavigateToPolicy }) => {
-    const { currentUser, users, switchUser, isDemo, resetDemoData } = useUser();
-    const { status: backendStatus, latency, checkConnection } = useBackend();
+const Header = ({ 
+  onToggleSidebar, 
+  showMenuButton, 
+  clients = [], 
+  policies = [], 
+  requests = [], 
+  claims = [], 
+  payments = [], 
+  onNavigate, 
+  onNavigateToPolicy,
+  onNavigateToClient
+}) => {
+    const { currentUser, users, switchUser, isDemo, resetDemoData, logout } = useUser();
     const [showUserMenu, setShowUserMenu] = useState(false);
-    const [showHasuraModal, setShowHasuraModal] = useState(false);
     const menuRef = useRef(null);
 
     // Global Search State
     const [globalSearch, setGlobalSearch] = useState('');
     const [showSearchResults, setShowSearchResults] = useState(false);
     const searchRef = useRef(null);
+
+    // Notifications State
+    const [showNotifications, setShowNotifications] = useState(false);
+    const [notifFilter, setNotifFilter] = useState('ALL'); // 'ALL', 'claims', 'policies', 'requests'
+    const notifRef = useRef(null);
+    const [readNotificationIds, setReadNotificationIds] = useState(() => {
+        try {
+            const saved = localStorage.getItem('app_read_notifications');
+            return saved ? JSON.parse(saved) : [];
+        } catch (e) {
+            return [];
+        }
+    });
+
+    // Build real-time notifications list
+    const notifications = useMemo(() => {
+        const list = [];
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        // 1. Siniestros abiertos / en curso
+        if (Array.isArray(claims)) {
+            claims.forEach(c => {
+                const isPending = !c.status || c.status === 'Abierto' || c.status === 'En Proceso' || c.status === 'Pendiente' || c.status === 'Open';
+                if (isPending) {
+                    list.push({
+                        id: `claim_${c.id || c.numero_siniestro}`,
+                        category: 'claims',
+                        type: 'claim',
+                        title: `Siniestro en Curso: ${c.numero_siniestro || `SIN-${c.id}`}`,
+                        subtitle: `${c.client || 'Cliente'} · ${c.type || 'Siniestro'} · Reclamado: ${c.amount || (c.monto_reclamado ? formatMoney(c.monto_reclamado) : 'N/D')}`,
+                        dateStr: c.date ? formatDateToDDMMYYYY(c.date) : 'En curso',
+                        priority: 'high',
+                        action: () => {
+                            if (onNavigate) onNavigate('claims');
+                        }
+                    });
+                }
+            });
+        }
+
+        // 2. Pólizas próximas a vencer o vencidas
+        if (Array.isArray(policies)) {
+            policies.forEach(p => {
+                if (!p.endDate) return;
+                const endD = new Date(p.endDate);
+                if (isNaN(endD.getTime())) return;
+                endD.setHours(0, 0, 0, 0);
+
+                const diffDays = Math.round((endD.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+
+                if (diffDays < 0 && p.status !== 'Cancelled' && p.status !== 'Cancelada') {
+                    list.push({
+                        id: `policy_expired_${p.id}`,
+                        category: 'policies',
+                        type: 'policy_expired',
+                        title: `Póliza Vencida: ${p.id}`,
+                        subtitle: `${p.client} · ${p.type} (${p.insurer}) · Venció el ${formatDateToDDMMYYYY(p.endDate)}`,
+                        dateStr: `Hace ${Math.abs(diffDays)} días`,
+                        priority: 'high',
+                        action: () => {
+                            if (onNavigateToPolicy) onNavigateToPolicy(p.id);
+                            else if (onNavigate) onNavigate('policies');
+                        }
+                    });
+                } else if (diffDays >= 0 && diffDays <= 30 && p.status !== 'Cancelled' && p.status !== 'Cancelada') {
+                    const pStats = getPolicyPaymentStats(p, payments);
+                    const isPaid = pStats.totalOwed <= 0;
+                    list.push({
+                        id: `policy_expiring_${p.id}`,
+                        category: 'policies',
+                        type: 'policy_expiring',
+                        title: isPaid ? `Próxima a Renovar: ${p.id}` : `Póliza por Vencer: ${p.id}`,
+                        subtitle: `${p.client} · ${p.type} (${p.insurer}) · Vence: ${formatDateToDDMMYYYY(p.endDate)}`,
+                        dateStr: diffDays === 0 ? 'Vence Hoy' : `En ${diffDays} días`,
+                        priority: diffDays <= 7 ? 'high' : 'medium',
+                        action: () => {
+                            if (onNavigateToPolicy) onNavigateToPolicy(p.id);
+                            else if (onNavigate) onNavigate('policies');
+                        }
+                    });
+                }
+            });
+        }
+
+        // 3. Solicitudes pendientes
+        if (Array.isArray(requests)) {
+            requests.forEach(r => {
+                if (r.status === 'Pendiente' || r.status === 'En Trámite') {
+                    list.push({
+                        id: `req_${r.id}`,
+                        category: 'requests',
+                        type: 'request',
+                        title: `Solicitud Pendiente: ${r.type || 'Trámite'}`,
+                        subtitle: `${r.client || r.applicantName || 'Cliente'} · ${r.insurer || 'Compañía'}`,
+                        dateStr: r.date ? formatDateToDDMMYYYY(r.date) : 'Pendiente',
+                        priority: 'medium',
+                        action: () => {
+                            if (onNavigate) onNavigate('requests');
+                        }
+                    });
+                }
+            });
+        }
+
+        return list;
+    }, [claims, policies, requests, onNavigate, onNavigateToPolicy]);
+
+    const unreadCount = useMemo(() => {
+        return notifications.filter(n => !readNotificationIds.includes(n.id)).length;
+    }, [notifications, readNotificationIds]);
+
+    const markAllAsRead = () => {
+        const allIds = notifications.map(n => n.id);
+        setReadNotificationIds(allIds);
+        try {
+            localStorage.setItem('app_read_notifications', JSON.stringify(allIds));
+        } catch (e) {}
+    };
+
+    const markAsRead = (id) => {
+        if (!readNotificationIds.includes(id)) {
+            const updated = [...readNotificationIds, id];
+            setReadNotificationIds(updated);
+            try {
+                localStorage.setItem('app_read_notifications', JSON.stringify(updated));
+            } catch (e) {}
+        }
+    };
+
+    const handleNotificationClick = (item) => {
+        markAsRead(item.id);
+        setShowNotifications(false);
+        if (item.action) {
+            item.action();
+        }
+    };
+
+    const filteredNotifications = useMemo(() => {
+        if (notifFilter === 'ALL') return notifications;
+        return notifications.filter(n => n.category === notifFilter);
+    }, [notifications, notifFilter]);
 
     // Calculate matching clients and policies in real-time as user types
     const matchingClients = useMemo(() => {
@@ -46,6 +199,9 @@ const Header = ({ onToggleSidebar, showMenuButton, clients = [], policies = [], 
             if (menuRef.current && !menuRef.current.contains(event.target)) {
                 setShowUserMenu(false);
             }
+            if (notifRef.current && !notifRef.current.contains(event.target)) {
+                setShowNotifications(false);
+            }
             if (searchRef.current && !searchRef.current.contains(event.target)) {
                 setShowSearchResults(false);
             }
@@ -55,6 +211,7 @@ const Header = ({ onToggleSidebar, showMenuButton, clients = [], policies = [], 
             if (event.key === 'Escape') {
                 setShowSearchResults(false);
                 setShowUserMenu(false);
+                setShowNotifications(false);
             }
         };
 
@@ -137,7 +294,7 @@ const Header = ({ onToggleSidebar, showMenuButton, clients = [], policies = [], 
                         </button>
 
                         <button
-                            onClick={() => switchUser('santiago')}
+                            onClick={() => switchUser('santiagom2401')}
                             style={{
                                 display: 'inline-flex',
                                 alignItems: 'center',
@@ -164,13 +321,16 @@ const Header = ({ onToggleSidebar, showMenuButton, clients = [], policies = [], 
 
             {/* Main Header Bar */}
             <div style={{
-                height: '75px',
+                minHeight: '65px',
+                height: 'auto',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
-                padding: '0 2rem'
+                padding: '0.6rem clamp(0.75rem, 2.5vw, 2rem)',
+                gap: '0.75rem',
+                flexWrap: 'wrap'
             }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                     {showMenuButton && (
                         <button
                             onClick={onToggleSidebar}
@@ -185,7 +345,8 @@ const Header = ({ onToggleSidebar, showMenuButton, clients = [], policies = [], 
                                 justifyContent: 'center',
                                 borderRadius: 'var(--radius-sm)',
                                 backgroundColor: '#fdf8f6',
-                                transition: 'background-color 0.2s'
+                                transition: 'background-color 0.2s',
+                                flexShrink: 0
                             }}
                             onMouseEnter={e => e.currentTarget.style.backgroundColor = '#ebdcd4'}
                             onMouseLeave={e => e.currentTarget.style.backgroundColor = '#fdf8f6'}
@@ -195,16 +356,16 @@ const Header = ({ onToggleSidebar, showMenuButton, clients = [], policies = [], 
                         </button>
                     )}
                     <div>
-                        <h1 style={{ fontSize: '1.6rem', color: 'var(--primary)', margin: 0 }}>Panel Principal</h1>
+                        <h1 style={{ fontSize: 'clamp(1.15rem, 2.5vw, 1.6rem)', color: 'var(--primary)', margin: 0, whiteSpace: 'nowrap' }}>Panel Principal</h1>
                     </div>
                 </div>
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'clamp(0.4rem, 1.5vw, 1rem)', flexWrap: 'wrap' }}>
                     <div ref={searchRef} style={{ position: 'relative' }}>
-                        <Search style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} size={18} />
+                        <Search style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} size={16} />
                         <input
                             type="text"
-                            placeholder="Buscar cliente o póliza..."
+                            placeholder="Buscar..."
                             value={globalSearch}
                             onChange={(e) => {
                                 setGlobalSearch(e.target.value);
@@ -214,11 +375,11 @@ const Header = ({ onToggleSidebar, showMenuButton, clients = [], policies = [], 
                                 if (globalSearch.trim()) setShowSearchResults(true);
                             }}
                             style={{
-                                paddingLeft: '40px',
-                                paddingRight: globalSearch ? '36px' : '12px',
-                                width: '280px',
-                                height: '42px',
-                                fontSize: '0.95rem'
+                                paddingLeft: '36px',
+                                paddingRight: globalSearch ? '32px' : '10px',
+                                width: 'clamp(130px, 20vw, 280px)',
+                                height: '38px',
+                                fontSize: '0.88rem'
                             }}
                         />
                         {globalSearch && (
@@ -229,7 +390,7 @@ const Header = ({ onToggleSidebar, showMenuButton, clients = [], policies = [], 
                                 }}
                                 style={{
                                     position: 'absolute',
-                                    right: '10px',
+                                    right: '8px',
                                     top: '50%',
                                     transform: 'translateY(-50%)',
                                     background: 'none',
@@ -242,7 +403,7 @@ const Header = ({ onToggleSidebar, showMenuButton, clients = [], policies = [], 
                                 }}
                                 title="Limpiar búsqueda"
                             >
-                                <X size={16} />
+                                <X size={15} />
                             </button>
                         )}
 
@@ -251,8 +412,8 @@ const Header = ({ onToggleSidebar, showMenuButton, clients = [], policies = [], 
                             <div style={{
                                 position: 'absolute',
                                 top: 'calc(100% + 8px)',
-                                left: 0,
-                                width: '380px',
+                                right: 0,
+                                width: 'min(380px, calc(100vw - 32px))',
                                 maxHeight: '420px',
                                 overflowY: 'auto',
                                 backgroundColor: 'white',
@@ -287,12 +448,17 @@ const Header = ({ onToggleSidebar, showMenuButton, clients = [], policies = [], 
                                         <div style={{ padding: '0.4rem 1rem', fontSize: '0.75rem', fontWeight: '700', color: 'var(--primary)', backgroundColor: '#faf5f0' }}>
                                             Clientes ({matchingClients.length})
                                         </div>
-                                        {matchingClients.slice(0, 5).map(c => (
+                                        {matchingClients.slice(0, 8).map(c => (
                                             <div
                                                 key={`client-${c.id}`}
                                                 onClick={() => {
                                                     setShowSearchResults(false);
-                                                    if (onNavigate) onNavigate('clients');
+                                                    setGlobalSearch('');
+                                                    if (onNavigateToClient) {
+                                                        onNavigateToClient(c.id);
+                                                    } else if (onNavigate) {
+                                                        onNavigate('clients');
+                                                    }
                                                 }}
                                                 style={{
                                                     padding: '0.6rem 1rem',
@@ -333,38 +499,69 @@ const Header = ({ onToggleSidebar, showMenuButton, clients = [], policies = [], 
                                         <div style={{ padding: '0.4rem 1rem', fontSize: '0.75rem', fontWeight: '700', color: 'var(--primary)', backgroundColor: '#faf5f0' }}>
                                             Pólizas ({matchingPolicies.length})
                                         </div>
-                                        {matchingPolicies.slice(0, 5).map(p => (
-                                            <div
-                                                key={`pol-${p.id}`}
-                                                onClick={() => {
-                                                    setShowSearchResults(false);
-                                                    if (onNavigateToPolicy) onNavigateToPolicy(p.id);
-                                                    else if (onNavigate) onNavigate('policies');
-                                                }}
-                                                style={{
-                                                    padding: '0.6rem 1rem',
-                                                    cursor: 'pointer',
-                                                    borderBottom: '1px solid #f8fafc',
-                                                    transition: 'background-color 0.15s',
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    justifyContent: 'space-between'
-                                                }}
-                                                onMouseEnter={e => e.currentTarget.style.backgroundColor = '#fdf8f6'}
-                                                onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
-                                            >
-                                                <div>
-                                                    <div style={{ fontWeight: '700', fontSize: '0.88rem', color: 'var(--primary)' }}>{p.id}</div>
-                                                    <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                                                        {p.client} · <span style={{ fontWeight: '500' }}>{p.type}</span>
+                                        {matchingPolicies.slice(0, 8).map(p => {
+                                            const computedStatus = calculatePolicyStatus ? calculatePolicyStatus(p, payments) : (p.status || 'Active');
+                                            const pStats = getPolicyPaymentStats ? getPolicyPaymentStats(p, payments) : { totalOwed: 0 };
+                                            const isPaid = pStats.totalOwed <= 0;
+                                            const isAvailable = computedStatus === 'Active';
+                                            const isExpiring = computedStatus === 'Expiring' || computedStatus === 'Pending';
+                                            const statusLabel = isAvailable ? 'Disponible' : isExpiring ? (isPaid ? 'Próximo a renovar' : 'A punto de vencer') : 'Vencido';
+                                            const statusBg = isAvailable ? '#dcfce7' : isExpiring ? (isPaid ? '#e0f2fe' : '#ffedd5') : '#fee2e2';
+                                            const statusColor = isAvailable ? '#166534' : isExpiring ? (isPaid ? '#0369a1' : '#9a3412') : '#991b1b';
+
+                                            return (
+                                                <div
+                                                    key={`pol-${p.id}`}
+                                                    onClick={() => {
+                                                        setShowSearchResults(false);
+                                                        setGlobalSearch('');
+                                                        if (onNavigateToPolicy) {
+                                                            onNavigateToPolicy(p.id);
+                                                        } else if (onNavigate) {
+                                                            onNavigate('policies');
+                                                        }
+                                                    }}
+                                                    style={{
+                                                        padding: '0.6rem 1rem',
+                                                        cursor: 'pointer',
+                                                        borderBottom: '1px solid #f8fafc',
+                                                        transition: 'background-color 0.15s',
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        justifyContent: 'space-between'
+                                                    }}
+                                                    onMouseEnter={e => e.currentTarget.style.backgroundColor = '#fdf8f6'}
+                                                    onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                                                >
+                                                    <div>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap' }}>
+                                                            <span style={{ fontWeight: '700', fontSize: '0.88rem', color: 'var(--primary)' }}>{p.id}</span>
+                                                            <span style={{
+                                                                fontSize: '0.68rem',
+                                                                fontWeight: '700',
+                                                                padding: '0.12rem 0.45rem',
+                                                                borderRadius: '999px',
+                                                                backgroundColor: statusBg,
+                                                                color: statusColor,
+                                                                display: 'inline-flex',
+                                                                alignItems: 'center',
+                                                                gap: '0.25rem'
+                                                            }}>
+                                                                {isAvailable ? <CheckCircle size={10} /> : isExpiring ? <AlertTriangle size={10} /> : <XCircle size={10} />}
+                                                                {statusLabel}
+                                                            </span>
+                                                        </div>
+                                                        <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                                                            {p.client} · <span style={{ fontWeight: '500' }}>{p.type}</span>
+                                                        </div>
+                                                    </div>
+                                                    <div style={{ textAlign: 'right' }}>
+                                                        <div style={{ fontSize: '0.75rem', fontWeight: '600', color: '#64748b' }}>{p.insurer}</div>
+                                                        <div style={{ fontSize: '0.8rem', fontWeight: '700', color: 'var(--text-main)' }}>{p.amount}</div>
                                                     </div>
                                                 </div>
-                                                <div style={{ textAlign: 'right' }}>
-                                                    <div style={{ fontSize: '0.75rem', fontWeight: '600', color: '#64748b' }}>{p.insurer}</div>
-                                                    <div style={{ fontSize: '0.8rem', fontWeight: '700', color: 'var(--text-main)' }}>{p.amount}</div>
-                                                </div>
-                                            </div>
-                                        ))}
+                                            );
+                                        })}
                                     </div>
                                 )}
 
@@ -377,56 +574,307 @@ const Header = ({ onToggleSidebar, showMenuButton, clients = [], policies = [], 
                         )}
                     </div>
 
-                    {/* Hasura Backend Status Pill */}
-                    <button
-                        onClick={() => setShowHasuraModal(true)}
-                        style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '0.45rem',
-                            padding: '0.45rem 0.8rem',
-                            fontSize: '0.82rem',
-                            fontWeight: '600',
-                            backgroundColor: backendStatus === 'connected' ? '#f0fdf4' : backendStatus === 'checking' ? '#eff6ff' : '#fef2f2',
-                            color: backendStatus === 'connected' ? '#15803d' : backendStatus === 'checking' ? '#1d4ed8' : '#b91c1c',
-                            border: `1.5px solid ${backendStatus === 'connected' ? '#bbf7d0' : backendStatus === 'checking' ? '#bfdbfe' : '#fecaca'}`,
-                            borderRadius: 'var(--radius-full)',
-                            cursor: 'pointer',
-                            transition: 'all 0.2s'
-                        }}
-                        title={`Estado Backend Hasura: ${backendStatus}. Clic para configurar.`}
-                    >
-                        <Database size={15} />
-                        <span>
-                            {backendStatus === 'connected' ? 'Hasura Online' : backendStatus === 'checking' ? 'Conectando...' : 'Hasura Local'}
-                        </span>
-                        <span style={{
-                            width: '8px',
-                            height: '8px',
-                            borderRadius: '50%',
-                            backgroundColor: backendStatus === 'connected' ? '#22c55e' : backendStatus === 'checking' ? '#3b82f6' : '#ef4444'
-                        }}></span>
-                    </button>
+                    {/* Interactive Notifications Panel */}
+                    <div style={{ position: 'relative' }} ref={notifRef}>
+                        <button
+                            onClick={() => {
+                                setShowNotifications(!showNotifications);
+                                setShowUserMenu(false);
+                                setShowSearchResults(false);
+                            }}
+                            style={{
+                                position: 'relative',
+                                background: showNotifications ? '#f1f5f9' : 'none',
+                                border: 'none',
+                                padding: '8px',
+                                color: showNotifications ? 'var(--primary)' : 'var(--text-muted)',
+                                borderRadius: '50%',
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                transition: 'all 0.2s'
+                            }}
+                            title="Centro de Notificaciones y Avisos"
+                        >
+                            <Bell size={22} />
+                            {unreadCount > 0 && (
+                                <span style={{
+                                    position: 'absolute',
+                                    top: '2px',
+                                    right: '2px',
+                                    minWidth: '18px',
+                                    height: '18px',
+                                    backgroundColor: '#ef4444',
+                                    color: 'white',
+                                    borderRadius: '999px',
+                                    fontSize: '0.68rem',
+                                    fontWeight: '800',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    padding: '0 4px',
+                                    boxShadow: '0 2px 4px rgba(239, 68, 68, 0.4)',
+                                    border: '2px solid white'
+                                }}>
+                                    {unreadCount > 99 ? '99+' : unreadCount}
+                                </span>
+                            )}
+                        </button>
 
-                    <button style={{
-                        position: 'relative',
-                        background: 'none',
-                        border: 'none',
-                        padding: '8px',
-                        color: 'var(--text-muted)',
-                        cursor: 'pointer'
-                    }} title="Notificaciones">
-                        <Bell size={24} />
-                        <span style={{
-                            position: 'absolute',
-                            top: '6px',
-                            right: '6px',
-                            width: '9px',
-                            height: '9px',
-                            backgroundColor: 'var(--error)',
-                            borderRadius: '50%'
-                        }}></span>
-                    </button>
+                        {/* Notifications Dropdown Panel */}
+                        {showNotifications && (
+                            <div style={{
+                                position: 'absolute',
+                                right: isDemo ? '-50px' : '-20px',
+                                top: 'calc(100% + 10px)',
+                                width: '390px',
+                                maxWidth: '92vw',
+                                backgroundColor: 'white',
+                                borderRadius: 'var(--radius-md)',
+                                boxShadow: '0 20px 40px -15px rgba(0,0,0,0.2), 0 0 0 1px rgba(0,0,0,0.06)',
+                                border: '1px solid var(--border)',
+                                zIndex: 1100,
+                                overflow: 'hidden',
+                                animation: 'fadeIn 0.15s ease-out'
+                            }}>
+                                {/* Header */}
+                                <div style={{
+                                    padding: '0.85rem 1rem',
+                                    backgroundColor: '#f8fafc',
+                                    borderBottom: '1px solid var(--border)',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between'
+                                }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                        <div style={{
+                                            width: '28px',
+                                            height: '28px',
+                                            borderRadius: '8px',
+                                            backgroundColor: '#eff6ff',
+                                            color: 'var(--primary)',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center'
+                                        }}>
+                                            <Bell size={16} />
+                                        </div>
+                                        <div>
+                                            <div style={{ fontWeight: '800', fontSize: '0.92rem', color: 'var(--text-main)' }}>
+                                                Notificaciones
+                                            </div>
+                                            <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                                                {unreadCount} aviso{unreadCount === 1 ? '' : 's'} pendiente{unreadCount === 1 ? '' : 's'}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {unreadCount > 0 && (
+                                        <button
+                                            type="button"
+                                            onClick={markAllAsRead}
+                                            style={{
+                                                background: 'none',
+                                                border: 'none',
+                                                color: '#2563eb',
+                                                fontSize: '0.75rem',
+                                                fontWeight: '700',
+                                                cursor: 'pointer',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: '0.25rem',
+                                                padding: '0.3rem 0.5rem',
+                                                borderRadius: '4px'
+                                            }}
+                                            onMouseEnter={e => e.currentTarget.style.backgroundColor = '#eff6ff'}
+                                            onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                                            title="Marcar todas como leídas"
+                                        >
+                                            <CheckCheck size={14} /> Marcar leídas
+                                        </button>
+                                    )}
+                                </div>
+
+                                {/* Filter Categories Tabs */}
+                                <div style={{
+                                    display: 'flex',
+                                    gap: '0.35rem',
+                                    padding: '0.5rem 0.85rem',
+                                    backgroundColor: '#ffffff',
+                                    borderBottom: '1px solid #f1f5f9',
+                                    overflowX: 'auto'
+                                }}>
+                                    {[
+                                        { id: 'ALL', label: 'Todas', count: notifications.length },
+                                        { id: 'claims', label: 'Siniestros', count: notifications.filter(n => n.category === 'claims').length },
+                                        { id: 'policies', label: 'Pólizas', count: notifications.filter(n => n.category === 'policies').length },
+                                        { id: 'requests', label: 'Solicitudes', count: notifications.filter(n => n.category === 'requests').length },
+                                    ].map(tab => (
+                                        <button
+                                            key={tab.id}
+                                            type="button"
+                                            onClick={() => setNotifFilter(tab.id)}
+                                            style={{
+                                                padding: '0.25rem 0.6rem',
+                                                borderRadius: '999px',
+                                                fontSize: '0.74rem',
+                                                fontWeight: notifFilter === tab.id ? '700' : '600',
+                                                border: 'none',
+                                                backgroundColor: notifFilter === tab.id ? 'var(--primary)' : '#f1f5f9',
+                                                color: notifFilter === tab.id ? 'white' : 'var(--text-muted)',
+                                                cursor: 'pointer',
+                                                whiteSpace: 'nowrap',
+                                                transition: 'all 0.15s'
+                                            }}
+                                        >
+                                            {tab.label} ({tab.count})
+                                        </button>
+                                    ))}
+                                </div>
+
+                                {/* Notifications List */}
+                                <div style={{ maxHeight: '330px', overflowY: 'auto' }}>
+                                    {filteredNotifications.length === 0 ? (
+                                        <div style={{ padding: '2.5rem 1.5rem', textAlign: 'center', color: 'var(--text-muted)' }}>
+                                            <div style={{ fontSize: '2rem', marginBottom: '0.4rem' }}>✨</div>
+                                            <div style={{ fontWeight: '700', fontSize: '0.9rem', color: 'var(--text-main)', marginBottom: '0.2rem' }}>
+                                                Sin notificaciones pendientes
+                                            </div>
+                                            <div style={{ fontSize: '0.78rem' }}>
+                                                {notifFilter === 'ALL'
+                                                    ? 'Todo se encuentra al día y en orden.'
+                                                    : 'No hay alertas para esta categoría.'}
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                            {filteredNotifications.map((notif) => {
+                                                const isUnread = !readNotificationIds.includes(notif.id);
+                                                return (
+                                                    <div
+                                                        key={notif.id}
+                                                        onClick={() => handleNotificationClick(notif)}
+                                                        style={{
+                                                            padding: '0.75rem 1rem',
+                                                            borderBottom: '1px solid #f1f5f9',
+                                                            backgroundColor: isUnread ? '#f8fafc' : 'white',
+                                                            display: 'flex',
+                                                            alignItems: 'flex-start',
+                                                            gap: '0.75rem',
+                                                            cursor: 'pointer',
+                                                            position: 'relative',
+                                                            transition: 'background-color 0.15s'
+                                                        }}
+                                                        onMouseEnter={e => e.currentTarget.style.backgroundColor = isUnread ? '#f1f5f9' : '#fafafa'}
+                                                        onMouseLeave={e => e.currentTarget.style.backgroundColor = isUnread ? '#f8fafc' : 'white'}
+                                                    >
+                                                        {/* Icon */}
+                                                        <div style={{
+                                                            width: '32px',
+                                                            height: '32px',
+                                                            borderRadius: '8px',
+                                                            backgroundColor: notif.category === 'claims' 
+                                                                ? '#fee2e2' 
+                                                                : notif.type === 'policy_expired'
+                                                                ? '#fee2e2'
+                                                                : notif.type === 'policy_expiring'
+                                                                ? '#fef3c7'
+                                                                : '#eff6ff',
+                                                            color: notif.category === 'claims' || notif.type === 'policy_expired'
+                                                                ? '#dc2626'
+                                                                : notif.type === 'policy_expiring'
+                                                                ? '#d97706'
+                                                                : '#2563eb',
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            justifyContent: 'center',
+                                                            flexShrink: 0,
+                                                            marginTop: '2px'
+                                                        }}>
+                                                            {notif.category === 'claims' ? (
+                                                                <Shield size={16} />
+                                                            ) : notif.type === 'policy_expired' ? (
+                                                                <AlertTriangle size={16} />
+                                                            ) : notif.type === 'policy_expiring' ? (
+                                                                <Clock size={16} />
+                                                            ) : (
+                                                                <FileCheck size={16} />
+                                                            )}
+                                                        </div>
+
+                                                        {/* Text */}
+                                                        <div style={{ flex: 1, minWidth: 0 }}>
+                                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', marginBottom: '0.15rem' }}>
+                                                                <span style={{ fontWeight: isUnread ? '800' : '600', fontSize: '0.85rem', color: 'var(--text-main)', lineHeight: 1.2 }}>
+                                                                    {notif.title}
+                                                                </span>
+                                                                {isUnread && (
+                                                                    <span style={{
+                                                                        width: '7px',
+                                                                        height: '7px',
+                                                                        borderRadius: '50%',
+                                                                        backgroundColor: '#2563eb',
+                                                                        flexShrink: 0
+                                                                    }} />
+                                                                )}
+                                                            </div>
+                                                            <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', lineHeight: 1.3, marginBottom: '0.3rem' }}>
+                                                                {notif.subtitle}
+                                                            </div>
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                                                <span style={{
+                                                                    fontSize: '0.68rem',
+                                                                    fontWeight: '700',
+                                                                    padding: '0.08rem 0.35rem',
+                                                                    borderRadius: '4px',
+                                                                    backgroundColor: notif.priority === 'high' ? '#fee2e2' : '#f1f5f9',
+                                                                    color: notif.priority === 'high' ? '#dc2626' : 'var(--text-muted)'
+                                                                }}>
+                                                                    {notif.dateStr}
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Footer */}
+                                <div style={{
+                                    padding: '0.65rem 1rem',
+                                    backgroundColor: '#f8fafc',
+                                    borderTop: '1px solid var(--border)',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center'
+                                }}>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setShowNotifications(false);
+                                            if (onNavigate) onNavigate('dashboard');
+                                        }}
+                                        style={{
+                                            background: 'none',
+                                            border: 'none',
+                                            color: 'var(--primary)',
+                                            fontSize: '0.78rem',
+                                            fontWeight: '700',
+                                            cursor: 'pointer',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '0.35rem'
+                                        }}
+                                    >
+                                        Ir al Panel de Control / Dashboard <ArrowRight size={14} />
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
 
                     {/* User Profile Selector Pill */}
                     <div style={{ position: 'relative' }} ref={menuRef}>
@@ -502,8 +950,10 @@ const Header = ({ onToggleSidebar, showMenuButton, clients = [], policies = [], 
                                             <div
                                                 key={user.id}
                                                 onClick={() => {
-                                                    switchUser(user.id);
                                                     setShowUserMenu(false);
+                                                    if (!isSelected) {
+                                                        switchUser(user.id);
+                                                    }
                                                 }}
                                                 style={{
                                                     display: 'flex',
@@ -565,17 +1015,41 @@ const Header = ({ onToggleSidebar, showMenuButton, clients = [], policies = [], 
                                         );
                                     })}
                                 </div>
+
+                                <div style={{ borderTop: '1px solid var(--border)', marginTop: '0.6rem', paddingTop: '0.6rem' }}>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setShowUserMenu(false);
+                                            logout();
+                                        }}
+                                        style={{
+                                            width: '100%',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            gap: '0.5rem',
+                                            padding: '0.55rem',
+                                            borderRadius: 'var(--radius-sm)',
+                                            border: '1px solid #fee2e2',
+                                            backgroundColor: '#fef2f2',
+                                            color: '#dc2626',
+                                            fontWeight: '700',
+                                            fontSize: '0.82rem',
+                                            cursor: 'pointer',
+                                            transition: 'all 0.15s'
+                                        }}
+                                        onMouseEnter={e => e.currentTarget.style.backgroundColor = '#fee2e2'}
+                                        onMouseLeave={e => e.currentTarget.style.backgroundColor = '#fef2f2'}
+                                    >
+                                        <LogOut size={16} /> Cerrar Sesión / Cambiar de Usuario
+                                    </button>
+                                </div>
                             </div>
                         )}
                     </div>
                 </div>
             </div>
-
-            {/* Hasura Settings Modal */}
-            <HasuraSettingsModal
-                isOpen={showHasuraModal}
-                onClose={() => setShowHasuraModal(false)}
-            />
         </header>
     );
 };

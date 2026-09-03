@@ -30,10 +30,6 @@ export const getNextRenewalDate = (startDate, renewalFrequency, endDate) => {
 export const processPolicyRenewalAndStatus = (policy, paymentsList = []) => {
     if (!policy) return { status: 'Active', isAutoRenewed: false, totalPaid: 0, totalOwed: 0, policy };
 
-    if (policy.status === 'Cancelled' || policy.status === 'Cancelada') {
-        return { status: 'Cancelled', isAutoRenewed: false, totalPaid: 0, totalOwed: 0, policy };
-    }
-
     const todayStr = new Date().toISOString().split('T')[0];
     const totalPremium = getPolicyAmountNumeric(policy.amount);
     
@@ -43,6 +39,27 @@ export const processPolicyRenewalAndStatus = (policy, paymentsList = []) => {
         .filter(p => p.status === 'Paid')
         .reduce((acc, p) => acc + (p.amountNum || 0), 0);
     const totalOwed = Math.max(0, totalPremium - totalPaid);
+
+    // REGLA DE NEGOCIO: Si la póliza tiene un movimiento de cancelación o fue formalmente cancelada
+    const hasCancellationMovement = (policy.movements || []).some(m => 
+        (m.type && m.type.toLowerCase().includes('cancel')) || 
+        (m.tipo && m.tipo.toLowerCase().includes('cancel')) ||
+        (m.description && m.description.toLowerCase().includes('cancel')) ||
+        (m.descripcion && m.descripcion.toLowerCase().includes('cancel'))
+    );
+
+    if (policy.status === 'Cancelled' || policy.status === 'Cancelada' || policy.isCancelled || hasCancellationMovement) {
+        return {
+            status: 'Cancelled',
+            isAutoRenewed: false,
+            totalPaid,
+            totalOwed: Math.max(0, totalPremium - totalPaid),
+            policy: {
+                ...policy,
+                status: 'Cancelled'
+            }
+        };
+    }
 
     let endDate = policy.endDate || policy.vigenciaFin || policy.renewal || getNextRenewalDate(policy.lastRenewalDate || policy.startDate, policy.renewalFrequency);
     let startDate = policy.startDate || '2025-01-01';
@@ -316,6 +333,44 @@ export const policyMatchesAgentCode = (policy, codeItem) => {
     }
 
     return polCode === targetCode;
+};
+
+export const LA_COLONIAL_DENOMINATIONS = {
+    '170': { code: '170', ramo: '170 Seguro Médico Catastrófico', category: 'Salud', label: 'Seguro Médico Catastrófico' },
+    '183': { code: '183', ramo: '183 Seguro Médico Internacional Individual', category: 'Salud', label: 'Seguro Médico Internacional Individual' },
+    '188': { code: '188', ramo: '188 Seguro Médico Internacional Aetna Familiar', category: 'Salud', label: 'Seguro Médico Internacional Aetna Familiar' },
+    '200': { code: '200', ramo: '200 Incendio y Líneas Aliadas', category: 'Incendio', label: 'Incendio y Líneas Aliadas' },
+    '205': { code: '205', ramo: '205 Todo Riesgo Incendio', category: 'Incendio', label: 'Todo Riesgo Incendio' },
+    '207': { code: '207', ramo: '207 Multiprotección Viviendas', category: 'Incendio', label: 'Multiprotección Viviendas' },
+    '400': { code: '400', ramo: '400 Transporte de Carga', category: 'Transporte de Carga', label: 'Transporte de Carga' },
+    '402': { code: '402', ramo: '402 Transporte Terrestre', category: 'Transporte de Carga', label: 'Transporte Terrestre' },
+    '500': { code: '500', ramo: '500 Vehículos de Motor', category: 'Auto', label: 'Vehículos de Motor' },
+    '504': { code: '504', ramo: '504 Vehículos de Motor ArmaloTu', category: 'Auto', label: 'Vehículos de Motor ÁrmaloTú' },
+    '710': { code: '710', ramo: '710 Fianzas Comerciales', category: 'Fidelidad / Fianzas', label: 'Fianzas Comerciales' },
+    '713': { code: '713', ramo: '713 Fianzas Judiciales', category: 'Fidelidad / Fianzas', label: 'Fianzas Judiciales' },
+    '714': { code: '714', ramo: '714 Fianzas de Cumplimiento', category: 'Fidelidad / Fianzas', label: 'Fianzas de Cumplimiento' },
+    '732': { code: '732', ramo: '732 Fidelidad 3D', category: 'Fidelidad / Fianzas', label: 'Fidelidad 3D' },
+    '812': { code: '812', ramo: '812 Todo Riesgo Equipo Contratista', category: 'Otros', label: 'Todo Riesgo Equipo Contratista' },
+    '813': { code: '813', ramo: '813 Todo Riesgo Construcción (CAR)', category: 'Otros', label: 'Todo Riesgo Construcción (CAR)' },
+    '830': { code: '830', ramo: '830 Responsabilidad Civil General', category: 'Responsabilidad Civil', label: 'Responsabilidad Civil General' },
+    '831': { code: '831', ramo: '831 Responsabilidad Civil General Exceso', category: 'Responsabilidad Civil', label: 'Responsabilidad Civil Exceso' },
+    '839': { code: '839', ramo: '839 Responsabilidad Civil Profesional', category: 'Responsabilidad Civil', label: 'Responsabilidad Civil Profesional' },
+};
+
+export const getLaColonialRamoInfo = (policyNumber) => {
+    if (!policyNumber) return null;
+    const str = String(policyNumber).trim();
+    const parts = str.split('-');
+    let code = '';
+    if (parts.length >= 3) {
+        code = parts[2];
+    } else {
+        const digits = str.replace(/\D/g, '');
+        if (digits.length === 12) {
+            code = digits.slice(2, 5);
+        }
+    }
+    return LA_COLONIAL_DENOMINATIONS[code] || null;
 };
 
 
