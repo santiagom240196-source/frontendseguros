@@ -1,8 +1,8 @@
 import React, { useState, useMemo } from 'react';
 import { 
-    Building, Phone, Mail, MapPin, Globe, Shield, Users, 
-    Plus, Search, Edit2, Trash2, ExternalLink, UserPlus, 
-    Check, X, FileText, AlertCircle, ArrowUpRight, Copy, CheckCircle2, ChevronRight, Edit3
+    Building, Building2, Phone, PhoneCall, MessageSquare, Mail, MapPin, Globe, Shield, ShieldAlert, Users, 
+    Plus, Search, Edit2, Edit3, Trash2, ExternalLink, UserPlus, KeyRound, DollarSign,
+    Check, X, FileText, AlertCircle, ArrowUpRight, Copy, CheckCircle2, ChevronRight
 } from 'lucide-react';
 import InsurerLogo from './InsurerLogo';
 import { formatMoney } from '../utils/policyHelpers';
@@ -762,7 +762,6 @@ const CompaniesManagement = ({ policies = [], payments = [], claims = [], compan
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(330px, 1fr))', gap: '1.5rem', marginBottom: '3rem' }}>
                 {filteredInsurers.map(insurer => {
                     const stats = statsByInsurer[insurer] || {};
-                    const isEditing = editingInsurer === insurer;
                     const compObj = companies.find(c => c.name === insurer) || {};
                     const contactsCount = stats.contactsCount || 0;
 
